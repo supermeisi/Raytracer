@@ -1,0 +1,29 @@
+{
+  "source": {
+    "position": [0.0, 0.0, -8.0],
+    "grid": {
+      "radius": 3,
+      "target_z": -3.5,
+      "spacing": 0.6
+    }
+  },
+  "path_length": 20.0,
+  "objects": [
+    {
+      "type": "sphere",
+      "name": "Glass sphere",
+      "center": [0.0, 0.0, 0.0],
+      "radius": 3.0,
+      "refractive_index": 1.5,
+      "color": 800
+    },
+    {
+      "type": "sphere",
+      "name": "Second glass sphere",
+      "center": [4.5, 0.0, 0.0],
+      "radius": 1.2,
+      "refractive_index": 1.33,
+      "color": 600
+    }
+  ]
+}

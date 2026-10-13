@@ -1,3 +1,5 @@
+#include "SceneConfig.h"
+
 #include <TCanvas.h>
 #include <TColor.h>
 #include <TLegend.h>
@@ -9,27 +11,50 @@
 #include <TView.h>
 #include <TVector3.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace {
 
-constexpr double kSphereRadius = 3.0;
-constexpr double kGlassIndex = 1.5;
-constexpr double kPathLength = 20.0;
 constexpr double kSurfaceEpsilon = 1e-5;
 
 struct RaySegment {
   TVector3 start;
   TVector3 end;
-  bool inGlass;
+  int sphereIndex;
 };
 
 using RayPath = std::vector<RaySegment>;
 
+struct SceneBounds {
+  TVector3 minimum{std::numeric_limits<double>::infinity(),
+                   std::numeric_limits<double>::infinity(),
+                   std::numeric_limits<double>::infinity()};
+  TVector3 maximum{-std::numeric_limits<double>::infinity(),
+                   -std::numeric_limits<double>::infinity(),
+                   -std::numeric_limits<double>::infinity()};
+
+  void Include(const TVector3 &point) {
+    minimum.SetXYZ(std::min(minimum.X(), point.X()),
+                   std::min(minimum.Y(), point.Y()),
+                   std::min(minimum.Z(), point.Z()));
+    maximum.SetXYZ(std::max(maximum.X(), point.X()),
+                   std::max(maximum.Y(), point.Y()),
+                   std::max(maximum.Z(), point.Z()));
+  }
+
+  void IncludeSphere(const TVector3 &center, double radius) {
+    Include(center - TVector3(radius, radius, radius));
+    Include(center + TVector3(radius, radius, radius));
+  }
+};
+
 bool IntersectSphere(const TVector3 &origin, const TVector3 &direction,
-                     double radius, double &distance, TVector3 &normal) {
-  const TVector3 offset = origin;
+                     const TVector3 &center, double radius, double &distance,
+                     TVector3 &normal) {
+  const TVector3 offset = origin - center;
   const double halfB = offset.Dot(direction);
   const double c = offset.Mag2() - radius * radius;
   const double discriminant = halfB * halfB - c;
@@ -45,39 +70,70 @@ bool IntersectSphere(const TVector3 &origin, const TVector3 &direction,
     return false;
   }
 
-  normal = (origin + direction * distance) * (1.0 / radius);
+  normal = (origin + direction * distance - center) * (1.0 / radius);
   return true;
 }
 
-RayPath TraceRay(const TVector3 &source, TVector3 direction) {
+TVector3 ToVector3(const std::array<double, 3> &vector) {
+  return TVector3(vector[0], vector[1], vector[2]);
+}
+
+RayPath TraceRay(const TVector3 &source, TVector3 direction,
+                 const SceneConfig &scene) {
   direction = direction.Unit();
   TVector3 origin = source;
   RayPath path;
   double travelled = 0.0;
-  bool inGlass = false;
+  int currentSphere = -1;
 
-  while (travelled < kPathLength) {
+  while (travelled < scene.pathLength) {
     double hitDistance = 0.0;
     TVector3 outwardNormal;
-    const double remaining = kPathLength - travelled;
-    if (!IntersectSphere(origin, direction, kSphereRadius, hitDistance,
-                         outwardNormal) ||
-        hitDistance >= remaining) {
-      path.push_back({origin, origin + direction * remaining, inGlass});
+    const double remaining = scene.pathLength - travelled;
+    int hitSphere = -1;
+    if (currentSphere >= 0) {
+      const SphereDescription &sphere = scene.spheres[currentSphere];
+      if (IntersectSphere(origin, direction, ToVector3(sphere.center),
+                          sphere.radius, hitDistance, outwardNormal)) {
+        hitSphere = currentSphere;
+      }
+    } else {
+      hitDistance = std::numeric_limits<double>::infinity();
+      for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
+        double candidateDistance = 0.0;
+        TVector3 candidateNormal;
+        const SphereDescription &sphere = scene.spheres[i];
+        if (IntersectSphere(origin, direction, ToVector3(sphere.center),
+                            sphere.radius, candidateDistance,
+                            candidateNormal) &&
+            candidateDistance < hitDistance) {
+          hitDistance = candidateDistance;
+          outwardNormal = candidateNormal;
+          hitSphere = static_cast<int>(i);
+        }
+      }
+    }
+
+    if (hitSphere < 0 || hitDistance >= remaining) {
+      path.push_back({origin, origin + direction * remaining, currentSphere});
       break;
     }
 
     const TVector3 hit = origin + direction * hitDistance;
-    path.push_back({origin, hit, inGlass});
+    path.push_back({origin, hit, currentSphere});
     travelled += hitDistance;
 
-    const bool entering = !inGlass;
+    const bool entering = currentSphere < 0;
     const TVector3 normalAgainstRay =
         entering ? outwardNormal : -outwardNormal;
-    const double incidentIndex = entering ? 1.0 : kGlassIndex;
-    const double transmittedIndex = entering ? kGlassIndex : 1.0;
+    const int nextSphere = entering ? hitSphere : -1;
+    const double incidentIndex =
+        entering ? 1.0 : scene.spheres[currentSphere].refractiveIndex;
+    const double transmittedIndex =
+        entering ? scene.spheres[nextSphere].refractiveIndex : 1.0;
     const double eta = incidentIndex / transmittedIndex;
-    const double cosIncident = -direction.Dot(normalAgainstRay);
+    const double cosIncident =
+        std::max(0.0, std::min(1.0, -direction.Dot(normalAgainstRay)));
     const double sinTransmittedSquared =
         eta * eta * (1.0 - cosIncident * cosIncident);
 
@@ -90,7 +146,7 @@ RayPath TraceRay(const TVector3 &source, TVector3 direction) {
           (direction * eta +
            normalAgainstRay * (eta * cosIncident - cosTransmitted))
               .Unit();
-      inGlass = !inGlass;
+      currentSphere = nextSphere;
     }
 
     origin = hit + direction * kSurfaceEpsilon;
@@ -100,7 +156,8 @@ RayPath TraceRay(const TVector3 &source, TVector3 direction) {
   return path;
 }
 
-void DrawSphereWireframe(double radius) {
+void DrawSphereWireframe(const TVector3 &center, double radius,
+                         Color_t color) {
   constexpr int kSamples = 80;
   constexpr int kLatitudeCount = 12;
   constexpr int kLongitudeCount = 16;
@@ -111,11 +168,12 @@ void DrawSphereWireframe(double radius) {
     TPolyLine3D *line = new TPolyLine3D(kSamples + 1);
     for (int i = 0; i <= kSamples; ++i) {
       const double azimuth = 2.0 * TMath::Pi() * i / kSamples;
-      line->SetPoint(i, radius * std::sin(polar) * std::cos(azimuth),
-                     radius * std::sin(polar) * std::sin(azimuth),
-                     radius * std::cos(polar));
+      line->SetPoint(
+          i, center.X() + radius * std::sin(polar) * std::cos(azimuth),
+          center.Y() + radius * std::sin(polar) * std::sin(azimuth),
+          center.Z() + radius * std::cos(polar));
     }
-    line->SetLineColor(kGray + 1);
+    line->SetLineColor(color);
     line->SetLineStyle(2);
     line->SetLineWidth(1);
     line->Draw("same");
@@ -127,53 +185,73 @@ void DrawSphereWireframe(double radius) {
     TPolyLine3D *line = new TPolyLine3D(kSamples + 1);
     for (int i = 0; i <= kSamples; ++i) {
       const double polar = TMath::Pi() * i / kSamples;
-      line->SetPoint(i, radius * std::sin(polar) * std::cos(azimuth),
-                     radius * std::sin(polar) * std::sin(azimuth),
-                     radius * std::cos(polar));
+      line->SetPoint(
+          i, center.X() + radius * std::sin(polar) * std::cos(azimuth),
+          center.Y() + radius * std::sin(polar) * std::sin(azimuth),
+          center.Z() + radius * std::cos(polar));
     }
-    line->SetLineColor(kGray + 1);
+    line->SetLineColor(color);
     line->SetLineStyle(2);
     line->SetLineWidth(1);
     line->Draw("same");
   }
 }
 
-void DrawSegment(const RaySegment &segment, Color_t outsideColor) {
+void DrawSegment(const RaySegment &segment, Color_t outsideColor,
+                 const SceneConfig &scene, SceneBounds &bounds) {
   TPolyLine3D *line = new TPolyLine3D(2);
   line->SetPoint(0, segment.start.X(), segment.start.Y(), segment.start.Z());
   line->SetPoint(1, segment.end.X(), segment.end.Y(), segment.end.Z());
-  line->SetLineColor(segment.inGlass ? kOrange + 7 : outsideColor);
+  const Color_t color =
+      segment.sphereIndex >= 0 ? scene.spheres[segment.sphereIndex].color
+                               : outsideColor;
+  line->SetLineColor(color);
   line->SetLineWidth(2);
   line->Draw("same");
+  bounds.Include(segment.start);
+  bounds.Include(segment.end);
+}
+
+TPolyLine3D *MakeLegendLine(Color_t color) {
+  TPolyLine3D *line = new TPolyLine3D(2);
+  line->SetPoint(0, 0.0, 0.0, 0.0);
+  line->SetPoint(1, 1.0, 1.0, 1.0);
+  line->SetLineColor(color);
+  line->SetLineWidth(2);
+  return line;
 }
 
 } // namespace
 
-void raytracer() {
+void raytracer(const SceneConfig &scene) {
   gROOT->SetStyle("Plain");
   gStyle->SetCanvasColor(kWhite);
 
   TCanvas *canvas =
       new TCanvas("raytracer_canvas", "ROOT 3D Ray Tracer", 1000, 800);
   TView *view = TView::CreateView(1);
-  view->SetRange(-5.0, -5.0, -9.0, 5.0, 5.0, 10.0);
+  const TVector3 source = ToVector3(scene.sourcePosition);
+  SceneBounds bounds;
+  bounds.Include(source);
 
-  DrawSphereWireframe(kSphereRadius);
+  for (const SphereDescription &sphere : scene.spheres) {
+    const TVector3 center = ToVector3(sphere.center);
+    DrawSphereWireframe(center, sphere.radius, sphere.color);
+    bounds.IncludeSphere(center, sphere.radius);
+  }
 
-  const TVector3 source(0.0, 0.0, -8.0);
   const int rayColors[] = {kAzure + 2, kBlue + 1, kCyan + 2, kMagenta + 1,
                            kGreen + 2, kViolet + 1, kRed + 1};
-  constexpr int kGridRadius = 3;
-  constexpr double kTargetZ = -3.5;
-  constexpr double kTargetSpacing = 0.6;
 
-  for (int y = -kGridRadius; y <= kGridRadius; ++y) {
-    for (int x = -kGridRadius; x <= kGridRadius; ++x) {
-      const TVector3 target(x * kTargetSpacing, y * kTargetSpacing, kTargetZ);
-      const RayPath path = TraceRay(source, target - source);
-      const Color_t color = rayColors[(x + y + 2 * kGridRadius) % 7];
+  for (int y = -scene.gridRadius; y <= scene.gridRadius; ++y) {
+    for (int x = -scene.gridRadius; x <= scene.gridRadius; ++x) {
+      const TVector3 target(x * scene.targetSpacing, y * scene.targetSpacing,
+                            scene.targetZ);
+      const RayPath path = TraceRay(source, target - source, scene);
+      const Color_t color =
+          rayColors[(x + y + 2 * scene.gridRadius) % 7];
       for (const RaySegment &segment : path) {
-        DrawSegment(segment, color);
+        DrawSegment(segment, color, scene, bounds);
       }
     }
   }
@@ -185,23 +263,32 @@ void raytracer() {
   sourceMarker->SetMarkerColor(kBlack);
   sourceMarker->Draw("same");
 
-  TPolyLine3D *outsideSample = new TPolyLine3D(2);
-  outsideSample->SetPoint(0, -4.5, -4.5, -8.0);
-  outsideSample->SetPoint(1, -4.0, -4.0, -7.5);
-  outsideSample->SetLineColor(kAzure + 2);
-  outsideSample->SetLineWidth(2);
-
-  TPolyLine3D *insideSample = new TPolyLine3D(2);
-  insideSample->SetPoint(0, -4.5, -4.5, -8.0);
-  insideSample->SetPoint(1, -4.0, -4.0, -7.5);
-  insideSample->SetLineColor(kOrange + 7);
-  insideSample->SetLineWidth(2);
-
-  TLegend *legend = new TLegend(0.72, 0.82, 0.97, 0.95);
-  legend->AddEntry(outsideSample, "Ray in air", "l");
-  legend->AddEntry(insideSample, "Ray in glass", "l");
+  const std::size_t displayedSpheres =
+      std::min<std::size_t>(scene.spheres.size(), 8);
+  TLegend *legend = new TLegend(
+      0.72, std::max(0.05, 0.95 - 0.04 * (displayedSpheres + 2)), 0.97, 0.95);
+  legend->AddEntry(MakeLegendLine(rayColors[0]), "Ray in air", "l");
+  for (std::size_t i = 0; i < displayedSpheres; ++i) {
+    const SphereDescription &sphere = scene.spheres[i];
+    legend->AddEntry(MakeLegendLine(sphere.color), sphere.name.c_str(), "l");
+  }
+  if (displayedSpheres < scene.spheres.size()) {
+    const std::string moreSpheres =
+        std::to_string(scene.spheres.size() - displayedSpheres) +
+        " more spheres";
+    legend->AddEntry(MakeLegendLine(kGray), moreSpheres.c_str(), "l");
+  }
   legend->AddEntry(sourceMarker, "Point source", "p");
   legend->Draw();
+
+  const double padding =
+      0.08 * std::max({bounds.maximum.X() - bounds.minimum.X(),
+                       bounds.maximum.Y() - bounds.minimum.Y(),
+                       bounds.maximum.Z() - bounds.minimum.Z(), 1.0});
+  view->SetRange(bounds.minimum.X() - padding, bounds.minimum.Y() - padding,
+                 bounds.minimum.Z() - padding, bounds.maximum.X() + padding,
+                 bounds.maximum.Y() + padding,
+                 bounds.maximum.Z() + padding);
 
   canvas->Modified();
   canvas->Update();
