@@ -51,6 +51,12 @@ target_link_libraries(raytracer PRIVATE
 )
 
 configure_file(scene.json scene.json COPYONLY)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/models")
+configure_file(
+  models/demo_step_block.step
+  "${CMAKE_CURRENT_BINARY_DIR}/models/demo_step_block.step"
+  COPYONLY
+)
 
 include(CTest)
 if(BUILD_TESTING)

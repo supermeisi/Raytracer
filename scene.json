@@ -65,6 +65,15 @@
       "height": 3.0,
       "refractive_index": 1.5,
       "color": 800
+    },
+    {
+      "type": "step",
+      "name": "Imported STEP block",
+      "file": "models/demo_step_block.step",
+      "center": [-7.0, -6.0, 0.0],
+      "mesh_deflection": 0.1,
+      "refractive_index": 1.5,
+      "color": 632
     }
   ]
 }

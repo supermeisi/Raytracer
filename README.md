@@ -63,6 +63,7 @@ length units as the STEP model, defaulting to `0.1`. The `center` field is a
 translation applied to the imported STEP coordinates. Imported CAD surfaces
 are approximated by their triangles; use a smaller deflection for higher
 fidelity at the cost of more triangles and slower tracing.
+The sample scenes import [demo_step_block.step](./models/demo_step_block.step).
 
 The detector has a center, surface normal, in-plane `u_axis`, physical width
 and height, histogram bin counts, and outline color. The `u_axis` is projected

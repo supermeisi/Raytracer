@@ -123,8 +123,17 @@ int main() {
 
     const SceneConfig example =
         LoadSceneConfig(std::string(RAYTRACER_SOURCE_DIR) + "/scene.json");
-    Require(example.objects.size() == 5,
-            "example scene should load all five optical objects");
+    Require(example.objects.size() == 6,
+            "example scene should load all six optical objects");
+    Require(example.objects.back().shape == ObjectShape::Step &&
+                !example.objects.back().triangles.empty(),
+            "example scene should import its STEP demonstration model");
+    const SceneConfig buildExample =
+        LoadSceneConfig(std::string(RAYTRACER_SOURCE_DIR) +
+                        "/build/scene.json");
+    Require(buildExample.objects.back().shape == ObjectShape::Step &&
+                !buildExample.objects.back().triangles.empty(),
+            "build scene should resolve the copied STEP model");
     Require(example.objects[1].name == "Second glass sphere",
             "object names should be loaded");
     Require(example.objects[1].center[0] == 4.5,
