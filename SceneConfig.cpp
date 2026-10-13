@@ -74,6 +74,43 @@ void ValidateScene(const SceneConfig &scene) {
     throw std::runtime_error("objects must contain at least one sphere");
   }
 
+  if (scene.detector) {
+    const PlaneDetectorDescription &detector = *scene.detector;
+    if (detector.width <= 0.0 || detector.height <= 0.0) {
+      throw std::runtime_error(
+          "detector width and height must be greater than 0");
+    }
+    if (detector.binsX < 1 || detector.binsX > 1000 || detector.binsY < 1 ||
+        detector.binsY > 1000 ||
+        static_cast<long long>(detector.binsX) * detector.binsY > 1000000) {
+      throw std::runtime_error(
+          "detector bins_x and bins_y must be 1-1000 with at most 1000000 "
+          "total bins");
+    }
+    if (detector.color < 0 ||
+        detector.color > std::numeric_limits<short>::max()) {
+      throw std::runtime_error("detector.color is outside the ROOT color "
+                               "index range");
+    }
+    const double normalMagnitude =
+        std::hypot(detector.normal[0], detector.normal[1], detector.normal[2]);
+    const double axisMagnitude =
+        std::hypot(detector.uAxis[0], detector.uAxis[1], detector.uAxis[2]);
+    if (!std::isfinite(normalMagnitude) || !std::isfinite(axisMagnitude) ||
+        normalMagnitude <= 0.0 || axisMagnitude <= 0.0) {
+      throw std::runtime_error(
+          "detector.normal and detector.u_axis must be nonzero vectors");
+    }
+    const double axisNormalDot = (detector.uAxis[0] * detector.normal[0] +
+                                  detector.uAxis[1] * detector.normal[1] +
+                                  detector.uAxis[2] * detector.normal[2]) /
+                                 axisMagnitude / normalMagnitude;
+    if (std::abs(axisNormalDot) >= 1.0 - 1e-10) {
+      throw std::runtime_error(
+          "detector.u_axis must not be parallel to detector.normal");
+    }
+  }
+
   for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
     const SphereDescription &sphere = scene.spheres[i];
     if (sphere.radius <= 0.0) {
@@ -152,7 +189,8 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
                       ReadFiniteNumber(optics.at("minimum_branch_intensity"),
                                        "optics.minimum_branch_intensity"),
                       maxBoundaryInteractions.get<int>(),
-                      {}};
+                      {},
+                      std::nullopt};
 
     const Json &objects = root.at("objects");
     if (!objects.is_array()) {
@@ -192,6 +230,35 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
            ReadFiniteNumber(object.at("refractive_index"),
                             prefix + ".refractive_index"),
            color});
+    }
+
+    if (root.contains("detector") && !root.at("detector").is_null()) {
+      const Json &detector = root.at("detector");
+      if (!detector.is_object()) {
+        throw std::runtime_error("detector must be a JSON object or null");
+      }
+      const Json &binsX = detector.at("bins_x");
+      const Json &binsY = detector.at("bins_y");
+      const Json &colorValue = detector.at("color");
+      if (!binsX.is_number_integer() || !binsY.is_number_integer()) {
+        throw std::runtime_error("detector.bins_x and detector.bins_y must "
+                                 "be integers");
+      }
+      if (!colorValue.is_number_integer()) {
+        throw std::runtime_error("detector.color must be an integer ROOT "
+                                 "color index");
+      }
+
+      scene.detector = PlaneDetectorDescription{
+          detector.value("name", std::string("Plane detector")),
+          ReadVector3(detector.at("center"), "detector.center"),
+          ReadVector3(detector.at("normal"), "detector.normal"),
+          ReadVector3(detector.at("u_axis"), "detector.u_axis"),
+          ReadFiniteNumber(detector.at("width"), "detector.width"),
+          ReadFiniteNumber(detector.at("height"), "detector.height"),
+          binsX.get<int>(),
+          binsY.get<int>(),
+          colorValue.get<int>()};
     }
 
     ValidateScene(scene);

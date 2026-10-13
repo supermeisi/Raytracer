@@ -10,6 +10,17 @@
     "minimum_branch_intensity": 0.01,
     "max_boundary_interactions": 8
   },
+  "detector": {
+    "name": "Exit plane detector",
+    "center": [0.0, 0.0, 8.0],
+    "normal": [0.0, 0.0, -1.0],
+    "u_axis": [1.0, 0.0, 0.0],
+    "width": 20.0,
+    "height": 20.0,
+    "bins_x": 100,
+    "bins_y": 100,
+    "color": 2
+  },
   "objects": [
     {
       "type": "sphere",

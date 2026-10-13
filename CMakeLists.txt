@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(ROOT CONFIG REQUIRED COMPONENTS Core Graf Graf3d Gpad Physics)
+find_package(ROOT CONFIG REQUIRED COMPONENTS Core Graf Graf3d Gpad Hist Physics)
 find_package(nlohmann_json 3.2.0 CONFIG REQUIRED)
 
 add_executable(raytracer
@@ -14,6 +14,7 @@ add_executable(raytracer
   raytracer_main.cpp
   SceneConfig.cpp
   Fresnel.cpp
+  Detector.cpp
 )
 
 target_link_libraries(raytracer PRIVATE
@@ -21,6 +22,7 @@ target_link_libraries(raytracer PRIVATE
   ROOT::Graf
   ROOT::Graf3d
   ROOT::Gpad
+  ROOT::Hist
   ROOT::Physics
   nlohmann_json::nlohmann_json
 )
@@ -32,6 +34,7 @@ if(BUILD_TESTING)
   add_executable(scene_config_tests
     SceneConfig.cpp
     Fresnel.cpp
+    Detector.cpp
     tests/scene_config_tests.cpp
   )
   target_include_directories(scene_config_tests PRIVATE

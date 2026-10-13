@@ -1,3 +1,4 @@
+#include "Detector.h"
 #include "Fresnel.h"
 #include "SceneConfig.h"
 
@@ -104,6 +105,49 @@ int main() {
             "Fresnel branch threshold should be loaded");
     Require(example.maxBoundaryInteractions == 8,
             "boundary interaction limit should be loaded");
+    Require(example.detector.has_value(),
+            "example scene should configure a plane detector");
+    Require(example.detector->binsX == 100 && example.detector->binsY == 100,
+            "detector histogram dimensions should be loaded");
+
+    PlaneDetectorHistogram detector(*example.detector);
+    const auto detectorHit =
+        detector.Intersect({0.0, 0.0, -8.0}, {0.0, 0.0, 1.0}, 30.0);
+    Require(detectorHit.has_value(),
+            "ray along the detector normal should register a hit");
+    Require(std::abs(detectorHit->distance - 16.0) < 1e-12 &&
+                std::abs(detectorHit->u) < 1e-12 &&
+                std::abs(detectorHit->v) < 1e-12,
+            "detector hit should have expected distance and local coordinates");
+    detector.Record(*detectorHit, 0.25);
+    detector.Record(*detectorHit, 0.5);
+    Require(std::abs(detector.TotalIntensity() - 0.75) < 1e-12,
+            "detector should accumulate ray intensity");
+    Require(std::abs(detector.Bins()[50 * 100 + 50] - 0.75) < 1e-12,
+            "center hit should land in the center histogram bin");
+    Require(!detector.Intersect({0.0, 0.0, -8.0}, {1.0, 0.0, 0.0}, 30.0),
+            "ray parallel to the detector plane should not hit it");
+    Require(!detector.Intersect({30.0, 0.0, -8.0}, {0.0, 0.0, 1.0}, 30.0),
+            "ray outside detector bounds should not hit it");
+    Require(!detector.Intersect({0.0, 0.0, -8.0}, {0.0, 0.0, 1.0}, 10.0),
+            "detector beyond the remaining ray length should not hit");
+    const auto nonUnitDirectionHit =
+        detector.Intersect({0.0, 0.0, -8.0}, {0.0, 0.0, 2.0}, 16.0);
+    Require(nonUnitDirectionHit.has_value() &&
+                std::abs(nonUnitDirectionHit->distance - 16.0) < 1e-12,
+            "detector intersection should use physical distance");
+
+    TemporaryScene detectorDisabledScene(R"json({
+      "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "objects":[{"type":"sphere","center":[0,0,0],"radius":1,
+                  "refractive_index":1.5,"color":800}]
+    })json");
+    Require(!LoadSceneConfig(detectorDisabledScene.Path().string())
+                 .detector.has_value(),
+            "scene should allow the detector to be omitted");
 
     const std::vector<std::array<double, 3>> directions =
         GenerateRayDirections(example);
@@ -197,6 +241,28 @@ int main() {
                   "refractive_index":1.5,"color":800}]
     })json"),
             "opening angles above 180 degrees should be rejected");
+    Require(FailsToLoad(R"json({
+      "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "detector":{"center":[0,0,8],"normal":[0,0,1],"u_axis":[0,0,2],
+                  "width":10,"height":10,"bins_x":10,"bins_y":10,"color":2},
+      "objects":[{"type":"sphere","center":[0,0,0],"radius":1,
+                  "refractive_index":1.5,"color":800}]
+    })json"),
+            "detector axis parallel to its normal should be rejected");
+    Require(FailsToLoad(R"json({
+      "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "detector":{"center":[0,0,8],"normal":[0,0,1],"u_axis":[1,0,0],
+                  "width":10,"height":10,"bins_x":1001,"bins_y":10,"color":2},
+      "objects":[{"type":"sphere","center":[0,0,0],"radius":1,
+                  "refractive_index":1.5,"color":800}]
+    })json"),
+            "excessive detector bin count should be rejected");
     Require(FailsToLoad(R"json({
       "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
                 "opening_angle_degrees":0},

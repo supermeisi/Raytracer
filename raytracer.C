@@ -1,9 +1,11 @@
 #include "SceneConfig.h"
 
+#include "Detector.h"
 #include "Fresnel.h"
 
 #include <TCanvas.h>
 #include <TColor.h>
+#include <TH2D.h>
 #include <TLegend.h>
 #include <TMath.h>
 #include <TPolyLine3D.h>
@@ -16,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -91,7 +94,8 @@ TVector3 ToVector3(const std::array<double, 3> &vector) {
 }
 
 RayPath TraceRay(const TVector3 &source, TVector3 direction,
-                 const SceneConfig &scene) {
+                 const SceneConfig &scene,
+                 PlaneDetectorHistogram *detectorHistogram) {
   std::vector<RayState> pending;
   pending.push_back({source, direction.Unit(), 0.0, -1, 1.0, 0});
   RayPath paths;
@@ -126,6 +130,23 @@ RayPath TraceRay(const TVector3 &source, TVector3 direction,
             outwardNormal = candidateNormal;
             hitSphere = static_cast<int>(i);
           }
+        }
+      }
+
+      if (detectorHistogram != nullptr) {
+        const double maxDistance =
+            hitSphere >= 0 ? std::min(remaining, hitDistance) : remaining;
+        const auto detectorHit = detectorHistogram->Intersect(
+            {state.origin.X(), state.origin.Y(), state.origin.Z()},
+            {state.direction.X(), state.direction.Y(), state.direction.Z()},
+            maxDistance);
+        if (detectorHit) {
+          const TVector3 hit =
+              state.origin + state.direction * detectorHit->distance;
+          paths.push_back(
+              {state.origin, hit, state.currentSphere, state.intensity});
+          detectorHistogram->Record(*detectorHit, state.intensity);
+          break;
         }
       }
 
@@ -183,6 +204,53 @@ RayPath TraceRay(const TVector3 &source, TVector3 direction,
   }
 
   return paths;
+}
+
+void DrawDetectorPlane(const PlaneDetectorDescription &detector,
+                       SceneBounds &bounds) {
+  const TVector3 center = ToVector3(detector.center);
+  const TVector3 normal = ToVector3(detector.normal).Unit();
+  TVector3 uAxis = ToVector3(detector.uAxis);
+  uAxis = (uAxis - normal * uAxis.Dot(normal)).Unit();
+  const TVector3 vAxis = normal.Cross(uAxis).Unit();
+  const TVector3 halfU = uAxis * (detector.width * 0.5);
+  const TVector3 halfV = vAxis * (detector.height * 0.5);
+  const TVector3 corners[] = {center - halfU - halfV, center + halfU - halfV,
+                              center + halfU + halfV, center - halfU + halfV,
+                              center - halfU - halfV};
+
+  TPolyLine3D *outline = new TPolyLine3D(5);
+  for (int i = 0; i < 5; ++i) {
+    outline->SetPoint(i, corners[i].X(), corners[i].Y(), corners[i].Z());
+    bounds.Include(corners[i]);
+  }
+  outline->SetLineColor(detector.color);
+  outline->SetLineWidth(2);
+  outline->Draw("same");
+}
+
+void DrawDetectorHistogram(const PlaneDetectorHistogram &detectorHistogram) {
+  const PlaneDetectorDescription &detector = detectorHistogram.Description();
+  TCanvas *canvas =
+      new TCanvas("detector_histogram_canvas", detector.name.c_str(), 900, 700);
+  TH2D *histogram = new TH2D(
+      "detected_light", (detector.name + ";Detector u;Detector v").c_str(),
+      detector.binsX, -detector.width * 0.5, detector.width * 0.5,
+      detector.binsY, -detector.height * 0.5, detector.height * 0.5);
+  histogram->SetDirectory(nullptr);
+  const std::vector<double> &bins = detectorHistogram.Bins();
+  for (int y = 0; y < detector.binsY; ++y) {
+    for (int x = 0; x < detector.binsX; ++x) {
+      const std::size_t index = static_cast<std::size_t>(y) *
+                                    static_cast<std::size_t>(detector.binsX) +
+                                static_cast<std::size_t>(x);
+      histogram->SetBinContent(x + 1, y + 1, bins[index]);
+    }
+  }
+  histogram->SetStats(false);
+  histogram->Draw("COLZ");
+  canvas->Modified();
+  canvas->Update();
 }
 
 void DrawSphereWireframe(const TVector3 &center, double radius, Color_t color) {
@@ -262,11 +330,17 @@ void raytracer(const SceneConfig &scene) {
   const TVector3 source = ToVector3(scene.sourcePosition);
   SceneBounds bounds;
   bounds.Include(source);
+  std::unique_ptr<PlaneDetectorHistogram> detectorHistogram;
 
   for (const SphereDescription &sphere : scene.spheres) {
     const TVector3 center = ToVector3(sphere.center);
     DrawSphereWireframe(center, sphere.radius, sphere.color);
     bounds.IncludeSphere(center, sphere.radius);
+  }
+  if (scene.detector) {
+    detectorHistogram =
+        std::make_unique<PlaneDetectorHistogram>(*scene.detector);
+    DrawDetectorPlane(*scene.detector, bounds);
   }
 
   const int rayColors[] = {kAzure + 2, kBlue + 1,   kCyan + 2, kMagenta + 1,
@@ -275,8 +349,8 @@ void raytracer(const SceneConfig &scene) {
   const std::vector<std::array<double, 3>> rayDirections =
       GenerateRayDirections(scene);
   for (std::size_t rayIndex = 0; rayIndex < rayDirections.size(); ++rayIndex) {
-    const RayPath path =
-        TraceRay(source, ToVector3(rayDirections[rayIndex]), scene);
+    const RayPath path = TraceRay(source, ToVector3(rayDirections[rayIndex]),
+                                  scene, detectorHistogram.get());
     const Color_t color = rayColors[rayIndex % 7];
     for (const RaySegment &segment : path) {
       DrawSegment(segment, color, scene, bounds);
@@ -319,4 +393,7 @@ void raytracer(const SceneConfig &scene) {
 
   canvas->Modified();
   canvas->Update();
+  if (detectorHistogram) {
+    DrawDetectorHistogram(*detectorHistogram);
+  }
 }

@@ -2,6 +2,7 @@
 #define ROOT_RAY_TRACER_SCENE_CONFIG_H
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,18 @@ struct SphereDescription {
   std::array<double, 3> center;
   double radius;
   double refractiveIndex;
+  int color;
+};
+
+struct PlaneDetectorDescription {
+  std::string name;
+  std::array<double, 3> center;
+  std::array<double, 3> normal;
+  std::array<double, 3> uAxis;
+  double width;
+  double height;
+  int binsX;
+  int binsY;
   int color;
 };
 
@@ -22,6 +35,7 @@ struct SceneConfig {
   double minimumBranchIntensity;
   int maxBoundaryInteractions;
   std::vector<SphereDescription> spheres;
+  std::optional<PlaneDetectorDescription> detector;
 };
 
 SceneConfig LoadSceneConfig(const std::string &filePath);
