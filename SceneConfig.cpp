@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -24,7 +25,7 @@ double ReadFiniteNumber(const Json &value, const std::string &description) {
 }
 
 std::array<double, 3> ReadVector3(const Json &value,
-                                 const std::string &description) {
+                                  const std::string &description) {
   if (!value.is_array() || value.size() != 3) {
     throw std::runtime_error(description + " must contain exactly 3 numbers");
   }
@@ -34,7 +35,7 @@ std::array<double, 3> ReadVector3(const Json &value,
 }
 
 double DistanceSquared(const std::array<double, 3> &left,
-                      const std::array<double, 3> &right) {
+                       const std::array<double, 3> &right) {
   double distanceSquared = 0.0;
   for (std::size_t axis = 0; axis < 3; ++axis) {
     const double delta = left[axis] - right[axis];
@@ -44,14 +45,30 @@ double DistanceSquared(const std::array<double, 3> &left,
 }
 
 void ValidateScene(const SceneConfig &scene) {
-  if (scene.gridRadius < 0 || scene.gridRadius > 100) {
-    throw std::runtime_error("source.grid.radius must be between 0 and 100");
+  if (scene.rayCount < 1 || scene.rayCount > 10000) {
+    throw std::runtime_error("source.ray_count must be between 1 and 10000");
   }
-  if (scene.targetSpacing <= 0.0) {
-    throw std::runtime_error("source.grid.spacing must be greater than 0");
+  if (scene.openingAngleDegrees < 0.0 || scene.openingAngleDegrees > 180.0) {
+    throw std::runtime_error(
+        "source.opening_angle_degrees must be between 0 and 180");
+  }
+  const double directionMagnitude =
+      std::hypot(scene.sourceDirection[0], scene.sourceDirection[1],
+                 scene.sourceDirection[2]);
+  if (!std::isfinite(directionMagnitude) || directionMagnitude <= 0.0) {
+    throw std::runtime_error("source.direction must not be the zero vector");
   }
   if (scene.pathLength <= 0.0) {
     throw std::runtime_error("path_length must be greater than 0");
+  }
+  if (scene.minimumBranchIntensity < 0.0 ||
+      scene.minimumBranchIntensity >= 1.0) {
+    throw std::runtime_error(
+        "optics.minimum_branch_intensity must be in [0, 1)");
+  }
+  if (scene.maxBoundaryInteractions < 1 || scene.maxBoundaryInteractions > 12) {
+    throw std::runtime_error(
+        "optics.max_boundary_interactions must be between 1 and 12");
   }
   if (scene.spheres.empty()) {
     throw std::runtime_error("objects must contain at least one sphere");
@@ -70,8 +87,7 @@ void ValidateScene(const SceneConfig &scene) {
     const double sourceDistanceSquared =
         DistanceSquared(scene.sourcePosition, sphere.center);
     if (sourceDistanceSquared <= sphere.radius * sphere.radius) {
-      throw std::runtime_error(
-          "source.position must be outside every sphere");
+      throw std::runtime_error("source.position must be outside every sphere");
     }
 
     for (std::size_t j = 0; j < i; ++j) {
@@ -109,22 +125,34 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
 
   try {
     const Json &source = root.at("source");
-    const Json &grid = source.at("grid");
-    if (!source.is_object() || !grid.is_object()) {
-      throw std::runtime_error("source and source.grid must be JSON objects");
+    const Json &optics = root.at("optics");
+    if (!source.is_object()) {
+      throw std::runtime_error("source must be a JSON object");
     }
-    const Json &gridRadius = grid.at("radius");
-    if (!gridRadius.is_number_integer()) {
-      throw std::runtime_error("source.grid.radius must be an integer");
+    if (!optics.is_object()) {
+      throw std::runtime_error("optics must be a JSON object");
+    }
+    const Json &rayCount = source.at("ray_count");
+    if (!rayCount.is_number_integer()) {
+      throw std::runtime_error("source.ray_count must be an integer");
+    }
+    const Json &maxBoundaryInteractions =
+        optics.at("max_boundary_interactions");
+    if (!maxBoundaryInteractions.is_number_integer()) {
+      throw std::runtime_error(
+          "optics.max_boundary_interactions must be an integer");
     }
 
-    SceneConfig scene{
-        ReadVector3(source.at("position"), "source.position"),
-        gridRadius.get<int>(),
-        ReadFiniteNumber(grid.at("target_z"), "source.grid.target_z"),
-        ReadFiniteNumber(grid.at("spacing"), "source.grid.spacing"),
-        ReadFiniteNumber(root.at("path_length"), "path_length"),
-        {}};
+    SceneConfig scene{ReadVector3(source.at("position"), "source.position"),
+                      ReadVector3(source.at("direction"), "source.direction"),
+                      rayCount.get<int>(),
+                      ReadFiniteNumber(source.at("opening_angle_degrees"),
+                                       "source.opening_angle_degrees"),
+                      ReadFiniteNumber(root.at("path_length"), "path_length"),
+                      ReadFiniteNumber(optics.at("minimum_branch_intensity"),
+                                       "optics.minimum_branch_intensity"),
+                      maxBoundaryInteractions.get<int>(),
+                      {}};
 
     const Json &objects = root.at("objects");
     if (!objects.is_array()) {
@@ -150,17 +178,16 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
       const Json &colorValue = object.at("color");
       if (!colorValue.is_number_integer()) {
         throw std::runtime_error(prefix + ".color must be an integer ROOT "
-                                 "color index");
+                                          "color index");
       }
       const int color = colorValue.get<int>();
       if (color < 0 || color > std::numeric_limits<short>::max()) {
-        throw std::runtime_error(prefix +
-                                 ".color is outside the ROOT color index range");
+        throw std::runtime_error(
+            prefix + ".color is outside the ROOT color index range");
       }
 
       scene.spheres.push_back(
-          {name,
-           ReadVector3(object.at("center"), prefix + ".center"),
+          {name, ReadVector3(object.at("center"), prefix + ".center"),
            ReadFiniteNumber(object.at("radius"), prefix + ".radius"),
            ReadFiniteNumber(object.at("refractive_index"),
                             prefix + ".refractive_index"),
@@ -173,4 +200,57 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
     throw std::runtime_error("invalid scene in " + filePath + ": " +
                              error.what());
   }
+}
+
+std::vector<std::array<double, 3>>
+GenerateRayDirections(const SceneConfig &scene) {
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kGoldenAngle = 2.39996322972865332;
+
+  std::array<double, 3> forward = scene.sourceDirection;
+  const double magnitude = std::hypot(forward[0], forward[1], forward[2]);
+  const double inverseMagnitude = 1.0 / magnitude;
+  for (double &component : forward) {
+    component *= inverseMagnitude;
+  }
+
+  const std::array<double, 3> reference =
+      std::abs(forward[2]) < 0.999 ? std::array<double, 3>{0.0, 0.0, 1.0}
+                                   : std::array<double, 3>{0.0, 1.0, 0.0};
+  std::array<double, 3> right{
+      reference[1] * forward[2] - reference[2] * forward[1],
+      reference[2] * forward[0] - reference[0] * forward[2],
+      reference[0] * forward[1] - reference[1] * forward[0]};
+  const double rightMagnitude = std::sqrt(
+      right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+  for (double &component : right) {
+    component /= rightMagnitude;
+  }
+  const std::array<double, 3> up{forward[1] * right[2] - forward[2] * right[1],
+                                 forward[2] * right[0] - forward[0] * right[2],
+                                 forward[0] * right[1] - forward[1] * right[0]};
+
+  const double halfAngle = 0.5 * scene.openingAngleDegrees * kPi / 180.0;
+  const double minimumCosine = std::cos(halfAngle);
+  std::vector<std::array<double, 3>> directions;
+  directions.reserve(static_cast<std::size_t>(scene.rayCount));
+  directions.push_back(forward);
+
+  for (int i = 1; i < scene.rayCount; ++i) {
+    const double radialFraction =
+        static_cast<double>(i) / static_cast<double>(scene.rayCount - 1);
+    const double cosine = 1.0 - radialFraction * (1.0 - minimumCosine);
+    const double sine = std::sqrt(std::max(0.0, 1.0 - cosine * cosine));
+    const double azimuth = (i - 1) * kGoldenAngle;
+    const std::array<double, 3> direction{
+        cosine * forward[0] +
+            sine * (std::cos(azimuth) * right[0] + std::sin(azimuth) * up[0]),
+        cosine * forward[1] +
+            sine * (std::cos(azimuth) * right[1] + std::sin(azimuth) * up[1]),
+        cosine * forward[2] +
+            sine * (std::cos(azimuth) * right[2] + std::sin(azimuth) * up[2])};
+    directions.push_back(direction);
+  }
+
+  return directions;
 }

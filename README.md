@@ -1,9 +1,9 @@
 # ROOT 3D Ray Tracer
 
-This ROOT macro traces a grid of light rays from a point source through a
-transparent glass scene. It uses Snell's law at sphere boundaries, reflects
-rays that undergo total internal reflection, and displays the ray paths and
-wireframe objects in an interactive 3D ROOT canvas.
+This ROOT application traces a configurable beam of light rays from a point
+source through a transparent glass scene. It uses Snell's law at sphere
+boundaries, reflects rays that undergo total internal reflection, and displays
+the ray paths and wireframe objects in an interactive 3D ROOT canvas.
 
 ## Build and run
 
@@ -27,17 +27,27 @@ Pass another scene description to load it instead:
 ./build/raytracer path/to/scene.json
 ```
 
-The JSON scene format has a source, ray grid, path length, and an array of
-non-overlapping spheres. Each sphere has a center, radius, refractive index,
-and ROOT color index:
+The JSON scene format configures the source position and beam, path length,
+Fresnel branching controls, and an array of non-overlapping spheres. The
+source's `ray_count` sets the exact number of rays, `direction` aims the center
+ray, and `opening_angle_degrees` sets the full cone angle (from 0 to 180 degrees).
+Rays are distributed over the cone using a deterministic spiral pattern,
+with the first ray following the configured direction.
+Each sphere has a center, radius, refractive index, and ROOT color index:
 
 ```json
 {
   "source": {
     "position": [0, 0, -8],
-    "grid": { "radius": 3, "target_z": -3.5, "spacing": 0.6 }
+    "direction": [0, 0, 1],
+    "ray_count": 49,
+    "opening_angle_degrees": 60
   },
   "path_length": 20,
+  "optics": {
+    "minimum_branch_intensity": 0.01,
+    "max_boundary_interactions": 8
+  },
   "objects": [
     {
       "type": "sphere",
@@ -52,12 +62,15 @@ and ROOT color index:
 ```
 
 Only spheres are currently supported. Spheres may not overlap or touch, and
-the source must be outside every sphere. `grid.radius` controls the number of
-rays in each direction around the center ray; the scene values are validated
-when loaded. The 3D view can be rotated with the mouse.
+the source must be outside every sphere. The direction vector is normalized
+automatically. Ray count is limited to 1–10000. The 3D view can be rotated
+with the mouse.
 
 Run the JSON loader tests with `ctest --test-dir build --output-on-failure`.
 
-The tracer follows one path per emitted ray: it handles refraction and total
-internal reflection, but does not split rays into separate Fresnel-reflected
-and transmitted branches.
+At each boundary, the unpolarized Fresnel equations split ray power into
+reflected and transmitted branches; total internal reflection sends all power
+into the reflected branch. Branch line width gives a visual indication of
+relative intensity. To keep the render bounded, branches below
+`optics.minimum_branch_intensity` are omitted, and each path ends after
+`optics.max_boundary_interactions` (1–12) boundary encounters.

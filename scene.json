@@ -1,13 +1,15 @@
 {
   "source": {
     "position": [0.0, 0.0, -8.0],
-    "grid": {
-      "radius": 3,
-      "target_z": -3.5,
-      "spacing": 0.6
-    }
+    "direction": [0.0, 0.0, 1.0],
+    "ray_count": 500,
+    "opening_angle_degrees": 60.0
   },
   "path_length": 20.0,
+  "optics": {
+    "minimum_branch_intensity": 0.01,
+    "max_boundary_interactions": 8
+  },
   "objects": [
     {
       "type": "sphere",

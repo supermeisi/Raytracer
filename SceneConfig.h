@@ -15,13 +15,17 @@ struct SphereDescription {
 
 struct SceneConfig {
   std::array<double, 3> sourcePosition;
-  int gridRadius;
-  double targetZ;
-  double targetSpacing;
+  std::array<double, 3> sourceDirection;
+  int rayCount;
+  double openingAngleDegrees;
   double pathLength;
+  double minimumBranchIntensity;
+  int maxBoundaryInteractions;
   std::vector<SphereDescription> spheres;
 };
 
 SceneConfig LoadSceneConfig(const std::string &filePath);
+std::vector<std::array<double, 3>>
+GenerateRayDirections(const SceneConfig &scene);
 
 #endif

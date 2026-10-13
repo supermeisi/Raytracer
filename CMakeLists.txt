@@ -13,6 +13,7 @@ add_executable(raytracer
   raytracer.C
   raytracer_main.cpp
   SceneConfig.cpp
+  Fresnel.cpp
 )
 
 target_link_libraries(raytracer PRIVATE
@@ -30,6 +31,7 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(scene_config_tests
     SceneConfig.cpp
+    Fresnel.cpp
     tests/scene_config_tests.cpp
   )
   target_include_directories(scene_config_tests PRIVATE

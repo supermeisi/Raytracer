@@ -1,5 +1,7 @@
 #include "SceneConfig.h"
 
+#include "Fresnel.h"
+
 #include <TCanvas.h>
 #include <TColor.h>
 #include <TLegend.h>
@@ -8,8 +10,8 @@
 #include <TPolyMarker3D.h>
 #include <TROOT.h>
 #include <TStyle.h>
-#include <TView.h>
 #include <TVector3.h>
+#include <TView.h>
 
 #include <algorithm>
 #include <cmath>
@@ -24,9 +26,19 @@ struct RaySegment {
   TVector3 start;
   TVector3 end;
   int sphereIndex;
+  double intensity;
 };
 
 using RayPath = std::vector<RaySegment>;
+
+struct RayState {
+  TVector3 origin;
+  TVector3 direction;
+  double travelled;
+  int currentSphere;
+  double intensity;
+  int boundaryInteractions;
+};
 
 struct SceneBounds {
   TVector3 minimum{std::numeric_limits<double>::infinity(),
@@ -80,84 +92,100 @@ TVector3 ToVector3(const std::array<double, 3> &vector) {
 
 RayPath TraceRay(const TVector3 &source, TVector3 direction,
                  const SceneConfig &scene) {
-  direction = direction.Unit();
-  TVector3 origin = source;
-  RayPath path;
-  double travelled = 0.0;
-  int currentSphere = -1;
+  std::vector<RayState> pending;
+  pending.push_back({source, direction.Unit(), 0.0, -1, 1.0, 0});
+  RayPath paths;
 
-  while (travelled < scene.pathLength) {
-    double hitDistance = 0.0;
-    TVector3 outwardNormal;
-    const double remaining = scene.pathLength - travelled;
-    int hitSphere = -1;
-    if (currentSphere >= 0) {
-      const SphereDescription &sphere = scene.spheres[currentSphere];
-      if (IntersectSphere(origin, direction, ToVector3(sphere.center),
-                          sphere.radius, hitDistance, outwardNormal)) {
-        hitSphere = currentSphere;
-      }
-    } else {
-      hitDistance = std::numeric_limits<double>::infinity();
-      for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
-        double candidateDistance = 0.0;
-        TVector3 candidateNormal;
-        const SphereDescription &sphere = scene.spheres[i];
-        if (IntersectSphere(origin, direction, ToVector3(sphere.center),
-                            sphere.radius, candidateDistance,
-                            candidateNormal) &&
-            candidateDistance < hitDistance) {
-          hitDistance = candidateDistance;
-          outwardNormal = candidateNormal;
-          hitSphere = static_cast<int>(i);
+  while (!pending.empty()) {
+    RayState state = pending.back();
+    pending.pop_back();
+    while (state.travelled < scene.pathLength &&
+           state.boundaryInteractions < scene.maxBoundaryInteractions) {
+      double hitDistance = 0.0;
+      TVector3 outwardNormal;
+      const double remaining = scene.pathLength - state.travelled;
+      int hitSphere = -1;
+      if (state.currentSphere >= 0) {
+        const SphereDescription &sphere = scene.spheres[state.currentSphere];
+        if (IntersectSphere(state.origin, state.direction,
+                            ToVector3(sphere.center), sphere.radius,
+                            hitDistance, outwardNormal)) {
+          hitSphere = state.currentSphere;
+        }
+      } else {
+        hitDistance = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
+          double candidateDistance = 0.0;
+          TVector3 candidateNormal;
+          const SphereDescription &sphere = scene.spheres[i];
+          if (IntersectSphere(state.origin, state.direction,
+                              ToVector3(sphere.center), sphere.radius,
+                              candidateDistance, candidateNormal) &&
+              candidateDistance < hitDistance) {
+            hitDistance = candidateDistance;
+            outwardNormal = candidateNormal;
+            hitSphere = static_cast<int>(i);
+          }
         }
       }
+
+      if (hitSphere < 0 || hitDistance >= remaining) {
+        paths.push_back({state.origin,
+                         state.origin + state.direction * remaining,
+                         state.currentSphere, state.intensity});
+        break;
+      }
+
+      const TVector3 hit = state.origin + state.direction * hitDistance;
+      paths.push_back(
+          {state.origin, hit, state.currentSphere, state.intensity});
+      state.travelled += hitDistance;
+      const bool entering = state.currentSphere < 0;
+      const TVector3 normalAgainstRay =
+          entering ? outwardNormal : -outwardNormal;
+      const int transmittedSphere = entering ? hitSphere : -1;
+      const double incidentIndex =
+          entering ? 1.0 : scene.spheres[state.currentSphere].refractiveIndex;
+      const double transmittedIndex =
+          entering ? scene.spheres[transmittedSphere].refractiveIndex : 1.0;
+      const FresnelSplit split = ComputeFresnelSplit(
+          {state.direction.X(), state.direction.Y(), state.direction.Z()},
+          {normalAgainstRay.X(), normalAgainstRay.Y(), normalAgainstRay.Z()},
+          incidentIndex, transmittedIndex);
+
+      ++state.boundaryInteractions;
+      const double reflectedIntensity = state.intensity * split.reflectance;
+      if (reflectedIntensity >= scene.minimumBranchIntensity) {
+        RayState reflected = state;
+        reflected.direction =
+            TVector3(split.reflectedDirection[0], split.reflectedDirection[1],
+                     split.reflectedDirection[2]);
+        reflected.origin = hit + reflected.direction * kSurfaceEpsilon;
+        reflected.travelled += kSurfaceEpsilon;
+        reflected.intensity = reflectedIntensity;
+        pending.push_back(reflected);
+      }
+
+      const double transmittedIntensity = state.intensity * split.transmittance;
+      if (split.hasTransmission &&
+          transmittedIntensity >= scene.minimumBranchIntensity) {
+        RayState transmitted = state;
+        transmitted.direction = TVector3(split.transmittedDirection[0],
+                                         split.transmittedDirection[1],
+                                         split.transmittedDirection[2]);
+        transmitted.origin = hit + transmitted.direction * kSurfaceEpsilon;
+        transmitted.currentSphere = transmittedSphere;
+        transmitted.travelled += kSurfaceEpsilon;
+        transmitted.intensity = transmittedIntensity;
+        pending.push_back(transmitted);
+      }
     }
-
-    if (hitSphere < 0 || hitDistance >= remaining) {
-      path.push_back({origin, origin + direction * remaining, currentSphere});
-      break;
-    }
-
-    const TVector3 hit = origin + direction * hitDistance;
-    path.push_back({origin, hit, currentSphere});
-    travelled += hitDistance;
-
-    const bool entering = currentSphere < 0;
-    const TVector3 normalAgainstRay =
-        entering ? outwardNormal : -outwardNormal;
-    const int nextSphere = entering ? hitSphere : -1;
-    const double incidentIndex =
-        entering ? 1.0 : scene.spheres[currentSphere].refractiveIndex;
-    const double transmittedIndex =
-        entering ? scene.spheres[nextSphere].refractiveIndex : 1.0;
-    const double eta = incidentIndex / transmittedIndex;
-    const double cosIncident =
-        std::max(0.0, std::min(1.0, -direction.Dot(normalAgainstRay)));
-    const double sinTransmittedSquared =
-        eta * eta * (1.0 - cosIncident * cosIncident);
-
-    if (sinTransmittedSquared > 1.0) {
-      direction =
-          (direction + normalAgainstRay * (2.0 * cosIncident)).Unit();
-    } else {
-      const double cosTransmitted = std::sqrt(1.0 - sinTransmittedSquared);
-      direction =
-          (direction * eta +
-           normalAgainstRay * (eta * cosIncident - cosTransmitted))
-              .Unit();
-      currentSphere = nextSphere;
-    }
-
-    origin = hit + direction * kSurfaceEpsilon;
-    travelled += kSurfaceEpsilon;
   }
 
-  return path;
+  return paths;
 }
 
-void DrawSphereWireframe(const TVector3 &center, double radius,
-                         Color_t color) {
+void DrawSphereWireframe(const TVector3 &center, double radius, Color_t color) {
   constexpr int kSamples = 80;
   constexpr int kLatitudeCount = 12;
   constexpr int kLongitudeCount = 16;
@@ -168,10 +196,10 @@ void DrawSphereWireframe(const TVector3 &center, double radius,
     TPolyLine3D *line = new TPolyLine3D(kSamples + 1);
     for (int i = 0; i <= kSamples; ++i) {
       const double azimuth = 2.0 * TMath::Pi() * i / kSamples;
-      line->SetPoint(
-          i, center.X() + radius * std::sin(polar) * std::cos(azimuth),
-          center.Y() + radius * std::sin(polar) * std::sin(azimuth),
-          center.Z() + radius * std::cos(polar));
+      line->SetPoint(i,
+                     center.X() + radius * std::sin(polar) * std::cos(azimuth),
+                     center.Y() + radius * std::sin(polar) * std::sin(azimuth),
+                     center.Z() + radius * std::cos(polar));
     }
     line->SetLineColor(color);
     line->SetLineStyle(2);
@@ -180,15 +208,14 @@ void DrawSphereWireframe(const TVector3 &center, double radius,
   }
 
   for (int longitude = 0; longitude < kLongitudeCount; ++longitude) {
-    const double azimuth =
-        2.0 * TMath::Pi() * longitude / kLongitudeCount;
+    const double azimuth = 2.0 * TMath::Pi() * longitude / kLongitudeCount;
     TPolyLine3D *line = new TPolyLine3D(kSamples + 1);
     for (int i = 0; i <= kSamples; ++i) {
       const double polar = TMath::Pi() * i / kSamples;
-      line->SetPoint(
-          i, center.X() + radius * std::sin(polar) * std::cos(azimuth),
-          center.Y() + radius * std::sin(polar) * std::sin(azimuth),
-          center.Z() + radius * std::cos(polar));
+      line->SetPoint(i,
+                     center.X() + radius * std::sin(polar) * std::cos(azimuth),
+                     center.Y() + radius * std::sin(polar) * std::sin(azimuth),
+                     center.Z() + radius * std::cos(polar));
     }
     line->SetLineColor(color);
     line->SetLineStyle(2);
@@ -202,11 +229,13 @@ void DrawSegment(const RaySegment &segment, Color_t outsideColor,
   TPolyLine3D *line = new TPolyLine3D(2);
   line->SetPoint(0, segment.start.X(), segment.start.Y(), segment.start.Z());
   line->SetPoint(1, segment.end.X(), segment.end.Y(), segment.end.Z());
-  const Color_t color =
-      segment.sphereIndex >= 0 ? scene.spheres[segment.sphereIndex].color
-                               : outsideColor;
+  const Color_t color = segment.sphereIndex >= 0
+                            ? scene.spheres[segment.sphereIndex].color
+                            : outsideColor;
   line->SetLineColor(color);
-  line->SetLineWidth(2);
+  line->SetLineWidth(std::max(
+      1,
+      static_cast<int>(std::lround(1.0 + 4.0 * std::sqrt(segment.intensity)))));
   line->Draw("same");
   bounds.Include(segment.start);
   bounds.Include(segment.end);
@@ -240,19 +269,17 @@ void raytracer(const SceneConfig &scene) {
     bounds.IncludeSphere(center, sphere.radius);
   }
 
-  const int rayColors[] = {kAzure + 2, kBlue + 1, kCyan + 2, kMagenta + 1,
+  const int rayColors[] = {kAzure + 2, kBlue + 1,   kCyan + 2, kMagenta + 1,
                            kGreen + 2, kViolet + 1, kRed + 1};
 
-  for (int y = -scene.gridRadius; y <= scene.gridRadius; ++y) {
-    for (int x = -scene.gridRadius; x <= scene.gridRadius; ++x) {
-      const TVector3 target(x * scene.targetSpacing, y * scene.targetSpacing,
-                            scene.targetZ);
-      const RayPath path = TraceRay(source, target - source, scene);
-      const Color_t color =
-          rayColors[(x + y + 2 * scene.gridRadius) % 7];
-      for (const RaySegment &segment : path) {
-        DrawSegment(segment, color, scene, bounds);
-      }
+  const std::vector<std::array<double, 3>> rayDirections =
+      GenerateRayDirections(scene);
+  for (std::size_t rayIndex = 0; rayIndex < rayDirections.size(); ++rayIndex) {
+    const RayPath path =
+        TraceRay(source, ToVector3(rayDirections[rayIndex]), scene);
+    const Color_t color = rayColors[rayIndex % 7];
+    for (const RaySegment &segment : path) {
+      DrawSegment(segment, color, scene, bounds);
     }
   }
 
@@ -279,6 +306,7 @@ void raytracer(const SceneConfig &scene) {
     legend->AddEntry(MakeLegendLine(kGray), moreSpheres.c_str(), "l");
   }
   legend->AddEntry(sourceMarker, "Point source", "p");
+  legend->AddEntry(MakeLegendLine(rayColors[0]), "Line width = intensity", "l");
   legend->Draw();
 
   const double padding =
@@ -287,8 +315,7 @@ void raytracer(const SceneConfig &scene) {
                        bounds.maximum.Z() - bounds.minimum.Z(), 1.0});
   view->SetRange(bounds.minimum.X() - padding, bounds.minimum.Y() - padding,
                  bounds.minimum.Z() - padding, bounds.maximum.X() + padding,
-                 bounds.maximum.Y() + padding,
-                 bounds.maximum.Z() + padding);
+                 bounds.maximum.Y() + padding, bounds.maximum.Z() + padding);
 
   canvas->Modified();
   canvas->Update();
