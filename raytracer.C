@@ -49,6 +49,14 @@ struct SceneBounds {
 
   void IncludeObject(const ObjectDescription &object) {
     const TVector3 center(object.center[0], object.center[1], object.center[2]);
+    if (object.shape == ObjectShape::Step) {
+      for (const MeshTriangle &triangle : object.triangles) {
+        for (const auto *vertex : {&triangle.a, &triangle.b, &triangle.c}) {
+          Include(center + TVector3((*vertex)[0], (*vertex)[1], (*vertex)[2]));
+        }
+      }
+      return;
+    }
     if (object.shape == ObjectShape::Sphere) {
       const double radius = object.radius;
       Include(center - TVector3(radius, radius, radius));
@@ -181,6 +189,21 @@ void DrawOpticalObject(const ObjectDescription &object) {
   const TVector3 center = ToVector3(object.center);
   if (object.shape == ObjectShape::Sphere) {
     DrawSphereWireframe(center, object.radius, object.color);
+  } else if (object.shape == ObjectShape::Step) {
+    for (const MeshTriangle &triangle : object.triangles) {
+      TPolyLine3D *line = new TPolyLine3D(4);
+      const std::array<std::array<double, 3>, 4> vertices{
+          triangle.a, triangle.b, triangle.c, triangle.a};
+      for (int vertex = 0; vertex < 4; ++vertex) {
+        line->SetPoint(vertex,
+                       center.X() + vertices[vertex][0],
+                       center.Y() + vertices[vertex][1],
+                       center.Z() + vertices[vertex][2]);
+      }
+      line->SetLineColor(object.color);
+      line->SetLineStyle(2);
+      line->Draw("same");
+    }
   } else if (object.shape == ObjectShape::Box) {
     const TVector3 half(object.size[0] * 0.5, object.size[1] * 0.5,
                         object.size[2] * 0.5);

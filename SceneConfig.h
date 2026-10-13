@@ -6,7 +6,13 @@
 #include <string>
 #include <vector>
 
-enum class ObjectShape { Sphere, Box, Tube, Cone };
+enum class ObjectShape { Sphere, Box, Tube, Cone, Step };
+
+struct MeshTriangle {
+  std::array<double, 3> a;
+  std::array<double, 3> b;
+  std::array<double, 3> c;
+};
 
 struct ObjectDescription {
   std::string name;
@@ -15,8 +21,10 @@ struct ObjectDescription {
   std::array<double, 3> size;
   double radius;
   double topRadius;
+  double meshDeflection;
   double refractiveIndex;
   int color;
+  std::vector<MeshTriangle> triangles;
 };
 
 struct PlaneDetectorDescription {

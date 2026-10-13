@@ -1,9 +1,11 @@
 #include "SceneConfig.h"
+#include "StepGeometry.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -57,6 +59,18 @@ double BoundingRadius(const ObjectDescription &object) {
   case ObjectShape::Cone:
     return std::hypot(std::max(object.radius, object.topRadius),
                       object.size[2] * 0.5);
+  case ObjectShape::Step: {
+    double radiusSquared = 0.0;
+    for (const MeshTriangle &triangle : object.triangles) {
+      for (const auto *vertex : {&triangle.a, &triangle.b, &triangle.c}) {
+        radiusSquared = std::max(
+            radiusSquared, (*vertex)[0] * (*vertex)[0] +
+                               (*vertex)[1] * (*vertex)[1] +
+                               (*vertex)[2] * (*vertex)[2]);
+      }
+    }
+    return std::sqrt(radiusSquared);
+  }
   }
   throw std::runtime_error("unknown optical object shape");
 }
@@ -152,6 +166,12 @@ void ValidateScene(const SceneConfig &scene) {
           object.radius + object.topRadius <= 0.0))) {
       throw std::runtime_error(
           prefix + " requires a positive height and valid radii");
+    }
+    if (object.shape == ObjectShape::Step &&
+        (object.triangles.empty() || object.meshDeflection <= 0.0)) {
+      throw std::runtime_error(prefix +
+                               " STEP mesh must contain triangles and have "
+                               "positive deflection");
     }
     if (object.refractiveIndex <= 0.0) {
       throw std::runtime_error("objects[" + std::to_string(i) +
@@ -265,9 +285,12 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
         shape = ObjectShape::Tube;
       } else if (type == "cone") {
         shape = ObjectShape::Cone;
+      } else if (type == "step") {
+        shape = ObjectShape::Step;
       } else {
         throw std::runtime_error(prefix +
-                                 ".type must be sphere, box, tube, or cone");
+                                 ".type must be sphere, box, tube, cone, or "
+                                 "step");
       }
 
       const std::string name =
@@ -289,9 +312,11 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
                                     {0.0, 0.0, 0.0},
                                     0.0,
                                     0.0,
+                                    0.1,
                                     ReadFiniteNumber(object.at("refractive_index"),
                                                      prefix + ".refractive_index"),
-                                    color};
+                                    color,
+                                    {}};
       if (shape == ObjectShape::Sphere || shape == ObjectShape::Tube) {
         description.radius =
             ReadFiniteNumber(object.at("radius"), prefix + ".radius");
@@ -304,13 +329,36 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
       } else if (shape == ObjectShape::Tube) {
         description.size[2] =
             ReadFiniteNumber(object.at("height"), prefix + ".height");
-      } else {
+      } else if (shape == ObjectShape::Cone) {
         description.radius = ReadFiniteNumber(object.at("bottom_radius"),
                                               prefix + ".bottom_radius");
         description.topRadius = ReadFiniteNumber(
             object.at("top_radius"), prefix + ".top_radius");
         description.size[2] =
             ReadFiniteNumber(object.at("height"), prefix + ".height");
+      } else {
+        const std::string stepFile =
+            object.at("file").get<std::string>();
+        if (stepFile.empty()) {
+          throw std::runtime_error(prefix + ".file must not be empty");
+        }
+        if (object.contains("mesh_deflection")) {
+          description.meshDeflection =
+              ReadFiniteNumber(object.at("mesh_deflection"),
+                               prefix + ".mesh_deflection");
+        }
+        std::filesystem::path resolvedStepFile(stepFile);
+        if (resolvedStepFile.is_relative()) {
+          resolvedStepFile =
+              std::filesystem::path(filePath).parent_path() / resolvedStepFile;
+        }
+        try {
+          description.triangles = LoadStepTriangles(
+              resolvedStepFile.lexically_normal().string(),
+              description.meshDeflection);
+        } catch (const std::exception &error) {
+          throw std::runtime_error(prefix + ": " + error.what());
+        }
       }
       scene.objects.push_back(std::move(description));
     }

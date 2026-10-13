@@ -28,6 +28,12 @@ Vector Scale(const Vector &value, double scale) {
   return {value[0] * scale, value[1] * scale, value[2] * scale};
 }
 
+Vector Cross(const Vector &left, const Vector &right) {
+  return {left[1] * right[2] - left[2] * right[1],
+          left[2] * right[0] - left[0] * right[2],
+          left[0] * right[1] - left[1] * right[0]};
+}
+
 double Dot(const Vector &left, const Vector &right) {
   return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
 }
@@ -116,6 +122,34 @@ bool IntersectObject(const ObjectDescription &object, const Vector &origin,
     }
     const Vector hit = Add(localOrigin, Scale(direction, candidate));
     consider(candidate, Scale(hit, 1.0 / object.radius));
+  } else if (object.shape == ObjectShape::Step) {
+    for (const MeshTriangle &triangle : object.triangles) {
+      const Vector vertexA = Add(object.center, triangle.a);
+      const Vector edge1 = Subtract(triangle.b, triangle.a);
+      const Vector edge2 = Subtract(triangle.c, triangle.a);
+      const Vector p = Cross(direction, edge2);
+      const double determinant = Dot(edge1, p);
+      if (std::abs(determinant) <= 1e-12) {
+        continue;
+      }
+      const double inverseDeterminant = 1.0 / determinant;
+      const Vector fromVertex = Subtract(origin, vertexA);
+      const double u = Dot(fromVertex, p) * inverseDeterminant;
+      if (u < 0.0 || u > 1.0) {
+        continue;
+      }
+      const Vector q = Cross(fromVertex, edge1);
+      const double v = Dot(direction, q) * inverseDeterminant;
+      if (v < 0.0 || u + v > 1.0) {
+        continue;
+      }
+      const double candidate = Dot(edge2, q) * inverseDeterminant;
+      const Vector triangleNormal = Cross(edge1, edge2);
+      if (std::hypot(triangleNormal[0], triangleNormal[1],
+                     triangleNormal[2]) > 1e-14) {
+        consider(candidate, triangleNormal);
+      }
+    }
   } else {
     const double halfHeight = object.size[2] * 0.5;
     const bool isTube = object.shape == ObjectShape::Tube;

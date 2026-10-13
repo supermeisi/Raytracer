@@ -3,6 +3,11 @@
 #include "RayTracingEngine.h"
 #include "SceneConfig.h"
 
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <STEPControl_StepModelType.hxx>
+#include <STEPControl_Writer.hxx>
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -35,6 +40,32 @@ public:
   }
 
   ~TemporaryScene() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+
+  const std::filesystem::path &Path() const { return path_; }
+
+private:
+  std::filesystem::path path_;
+};
+
+class TemporaryStep {
+public:
+  TemporaryStep() {
+    const auto now =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("raytracer-step-" + std::to_string(now) + ".step");
+    STEPControl_Writer writer;
+    if (writer.Transfer(BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape(),
+                        STEPControl_AsIs) != IFSelect_RetDone ||
+        writer.Write(path_.string().c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("could not create temporary STEP test file");
+    }
+  }
+
+  ~TemporaryStep() {
     std::error_code error;
     std::filesystem::remove(path_, error);
   }
@@ -188,6 +219,46 @@ int main() {
                 additionalShapes.objects[3].radius == 2.0 &&
                 additionalShapes.objects[3].topRadius == 0.5,
             "cone bottom and top radii should be loaded");
+
+    TemporaryStep stepFile;
+    const std::string stepSceneJson =
+        std::string(R"json({
+      "source":{"position":[1,1,-5],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "objects":[{"type":"step","file":")json") +
+        stepFile.Path().filename().string() +
+        R"json(","center":[0,0,0],"mesh_deflection":0.1,
+                  "refractive_index":1.5,"color":800}]
+    })json";
+    TemporaryScene stepSceneFile(stepSceneJson);
+    const SceneConfig stepScene = LoadSceneConfig(stepSceneFile.Path().string());
+    Require(stepScene.objects.size() == 1 &&
+                stepScene.objects[0].shape == ObjectShape::Step &&
+                !stepScene.objects[0].triangles.empty(),
+            "STEP geometry should load and tessellate");
+    std::atomic<std::size_t> stepProgress{0};
+    const std::vector<std::array<double, 3>> stepRayDirection{{0, 0, 1}};
+    const auto stepRays = TraceRaysParallel(
+        stepScene, stepRayDirection, 1, stepProgress);
+    bool stepObjectTraversed = false;
+    for (const TracedRaySegment &segment : stepRays[0].segments) {
+      stepObjectTraversed =
+          stepObjectTraversed || segment.objectIndex == 0;
+    }
+    Require(stepObjectTraversed && !stepRays[0].segments.empty() &&
+                std::abs(stepRays[0].segments[0].end[2]) < 1e-9,
+            "ray should intersect the imported STEP box");
+    Require(FailsToLoad(R"json({
+      "source":{"position":[0,0,-5],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "objects":[{"type":"step","file":"missing.step","center":[0,0,0],
+                  "refractive_index":1.5,"color":800}]
+    })json"),
+            "missing STEP files should report a load failure");
 
     for (const ObjectDescription &object : additionalShapes.objects) {
       if (object.shape == ObjectShape::Sphere) {

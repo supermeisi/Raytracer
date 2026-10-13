@@ -17,8 +17,10 @@ cmake --build build
 
 If ROOT's `ROOTConfig.cmake` is already in CMake's package search path, omit
 `-DCMAKE_PREFIX_PATH`. Alternatively, set `ROOT_DIR` to the directory
-containing `ROOTConfig.cmake`. The JSON parser dependency is nlohmann-json
-(for example, install `nlohmann-json3-dev` on Debian or Ubuntu).
+containing `ROOTConfig.cmake`. The JSON parser dependency is nlohmann-json (for example, install
+`nlohmann-json3-dev` on Debian or Ubuntu). STEP imports require OpenCASCADE
+development libraries (for example, `libocct-data-exchange-dev` on Debian or
+Ubuntu) in addition to ROOT.
 
 The default [scene.json](./scene.json) is loaded when no argument is given.
 Pass another scene description to load it instead:
@@ -40,6 +42,27 @@ shows the percentage and count of source rays completed; all ROOT drawing
 remains on the main thread. Every object has a center, refractive index, and
 ROOT color index. Supported shapes are spheres, axis-aligned boxes, solid
 cylindrical tubes, and conical frustums; tube and cone axes are along Z.
+STEP files are tessellated with OpenCASCADE at load time and ray-traced as
+triangles. For example, add this object to the `objects` array:
+
+```json
+{
+  "type": "step",
+  "name": "Imported CAD lens",
+  "file": "models/lens.step",
+  "center": [0, 0, 0],
+  "mesh_deflection": 0.1,
+  "refractive_index": 1.5,
+  "color": 800
+}
+```
+
+The STEP `file` path is resolved relative to the JSON scene file.
+`mesh_deflection` is the maximum linear tessellation deflection in the same
+length units as the STEP model, defaulting to `0.1`. The `center` field is a
+translation applied to the imported STEP coordinates. Imported CAD surfaces
+are approximated by their triangles; use a smaller deflection for higher
+fidelity at the cost of more triangles and slower tracing.
 
 The detector has a center, surface normal, in-plane `u_axis`, physical width
 and height, histogram bin counts, and outline color. The `u_axis` is projected
