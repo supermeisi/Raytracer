@@ -47,9 +47,25 @@ struct SceneBounds {
                    std::max(maximum.Z(), point.Z()));
   }
 
-  void IncludeSphere(const TVector3 &center, double radius) {
-    Include(center - TVector3(radius, radius, radius));
-    Include(center + TVector3(radius, radius, radius));
+  void IncludeObject(const ObjectDescription &object) {
+    const TVector3 center(object.center[0], object.center[1], object.center[2]);
+    if (object.shape == ObjectShape::Sphere) {
+      const double radius = object.radius;
+      Include(center - TVector3(radius, radius, radius));
+      Include(center + TVector3(radius, radius, radius));
+      return;
+    }
+    const double radius =
+        object.shape == ObjectShape::Box
+            ? 0.0
+            : std::max(object.radius, object.topRadius);
+    const TVector3 halfSize =
+        object.shape == ObjectShape::Box
+            ? TVector3(object.size[0] * 0.5, object.size[1] * 0.5,
+                       object.size[2] * 0.5)
+            : TVector3(radius, radius, object.size[2] * 0.5);
+    Include(center - halfSize);
+    Include(center + halfSize);
   }
 };
 
@@ -104,6 +120,24 @@ void DrawDetectorHistogram(const PlaneDetectorHistogram &detectorHistogram) {
   canvas->Update();
 }
 
+void DrawCircle(const TVector3 &center, double radius, Color_t color,
+                bool closed) {
+  if (radius <= 0.0) {
+    return;
+  }
+  constexpr int kSamples = 48;
+  TPolyLine3D *line = new TPolyLine3D(kSamples + (closed ? 1 : 0));
+  const int pointCount = kSamples + (closed ? 1 : 0);
+  for (int i = 0; i < pointCount; ++i) {
+    const double angle = 2.0 * TMath::Pi() * i / kSamples;
+    line->SetPoint(i, center.X() + radius * std::cos(angle),
+                   center.Y() + radius * std::sin(angle), center.Z());
+  }
+  line->SetLineColor(color);
+  line->SetLineStyle(2);
+  line->Draw("same");
+}
+
 void DrawSphereWireframe(const TVector3 &center, double radius, Color_t color) {
   constexpr int kSamples = 80;
   constexpr int kLatitudeCount = 12;
@@ -143,13 +177,63 @@ void DrawSphereWireframe(const TVector3 &center, double radius, Color_t color) {
   }
 }
 
+void DrawOpticalObject(const ObjectDescription &object) {
+  const TVector3 center = ToVector3(object.center);
+  if (object.shape == ObjectShape::Sphere) {
+    DrawSphereWireframe(center, object.radius, object.color);
+  } else if (object.shape == ObjectShape::Box) {
+    const TVector3 half(object.size[0] * 0.5, object.size[1] * 0.5,
+                        object.size[2] * 0.5);
+    TVector3 corners[8];
+    for (int corner = 0; corner < 8; ++corner) {
+      corners[corner] =
+          center + TVector3((corner & 1) ? half.X() : -half.X(),
+                            (corner & 2) ? half.Y() : -half.Y(),
+                            (corner & 4) ? half.Z() : -half.Z());
+    }
+    constexpr int edges[][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7},
+                                {0, 2}, {1, 3}, {4, 6}, {5, 7},
+                                {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto &edge : edges) {
+      TPolyLine3D *line = new TPolyLine3D(2);
+      line->SetPoint(0, corners[edge[0]].X(), corners[edge[0]].Y(),
+                     corners[edge[0]].Z());
+      line->SetPoint(1, corners[edge[1]].X(), corners[edge[1]].Y(),
+                     corners[edge[1]].Z());
+      line->SetLineColor(object.color);
+      line->SetLineStyle(2);
+      line->Draw("same");
+    }
+  } else {
+    const double halfHeight = object.size[2] * 0.5;
+    const TVector3 bottom(center.X(), center.Y(), center.Z() - halfHeight);
+    const TVector3 top(center.X(), center.Y(), center.Z() + halfHeight);
+    const double topRadius =
+        object.shape == ObjectShape::Tube ? object.radius : object.topRadius;
+    DrawCircle(bottom, object.radius, object.color, true);
+    DrawCircle(top, topRadius, object.color, true);
+    constexpr int kMeridians = 12;
+    for (int i = 0; i < kMeridians; ++i) {
+      const double angle = 2.0 * TMath::Pi() * i / kMeridians;
+      TPolyLine3D *line = new TPolyLine3D(2);
+      line->SetPoint(0, bottom.X() + object.radius * std::cos(angle),
+                     bottom.Y() + object.radius * std::sin(angle), bottom.Z());
+      line->SetPoint(1, top.X() + topRadius * std::cos(angle),
+                     top.Y() + topRadius * std::sin(angle), top.Z());
+      line->SetLineColor(object.color);
+      line->SetLineStyle(2);
+      line->Draw("same");
+    }
+  }
+}
+
 void DrawSegment(const RaySegment &segment, Color_t outsideColor,
                  const SceneConfig &scene, SceneBounds &bounds) {
   TPolyLine3D *line = new TPolyLine3D(2);
   line->SetPoint(0, segment.start[0], segment.start[1], segment.start[2]);
   line->SetPoint(1, segment.end[0], segment.end[1], segment.end[2]);
-  const Color_t color = segment.sphereIndex >= 0
-                            ? scene.spheres[segment.sphereIndex].color
+  const Color_t color = segment.objectIndex >= 0
+                            ? scene.objects[segment.objectIndex].color
                             : outsideColor;
   line->SetLineColor(color);
   line->SetLineWidth(std::max(
@@ -190,10 +274,9 @@ void raytracer(const SceneConfig &scene) {
   bounds.Include(source);
   std::unique_ptr<PlaneDetectorHistogram> detectorHistogram;
 
-  for (const SphereDescription &sphere : scene.spheres) {
-    const TVector3 center = ToVector3(sphere.center);
-    DrawSphereWireframe(center, sphere.radius, sphere.color);
-    bounds.IncludeSphere(center, sphere.radius);
+  for (const ObjectDescription &object : scene.objects) {
+    DrawOpticalObject(object);
+    bounds.IncludeObject(object);
   }
   if (scene.detector) {
     detectorHistogram =
@@ -252,20 +335,20 @@ void raytracer(const SceneConfig &scene) {
   sourceMarker->SetMarkerColor(kBlack);
   sourceMarker->Draw("same");
 
-  const std::size_t displayedSpheres =
-      std::min<std::size_t>(scene.spheres.size(), 8);
+  const std::size_t displayedObjects =
+      std::min<std::size_t>(scene.objects.size(), 8);
   TLegend *legend = new TLegend(
-      0.72, std::max(0.05, 0.95 - 0.04 * (displayedSpheres + 2)), 0.97, 0.95);
+      0.72, std::max(0.05, 0.95 - 0.04 * (displayedObjects + 2)), 0.97, 0.95);
   legend->AddEntry(MakeLegendLine(rayColors[0]), "Ray in air", "l");
-  for (std::size_t i = 0; i < displayedSpheres; ++i) {
-    const SphereDescription &sphere = scene.spheres[i];
-    legend->AddEntry(MakeLegendLine(sphere.color), sphere.name.c_str(), "l");
+  for (std::size_t i = 0; i < displayedObjects; ++i) {
+    const ObjectDescription &object = scene.objects[i];
+    legend->AddEntry(MakeLegendLine(object.color), object.name.c_str(), "l");
   }
-  if (displayedSpheres < scene.spheres.size()) {
-    const std::string moreSpheres =
-        std::to_string(scene.spheres.size() - displayedSpheres) +
-        " more spheres";
-    legend->AddEntry(MakeLegendLine(kGray), moreSpheres.c_str(), "l");
+  if (displayedObjects < scene.objects.size()) {
+    const std::string moreObjects =
+        std::to_string(scene.objects.size() - displayedObjects) +
+        " more objects";
+    legend->AddEntry(MakeLegendLine(kGray), moreObjects.c_str(), "l");
   }
   legend->AddEntry(sourceMarker, "Point source", "p");
   legend->AddEntry(MakeLegendLine(rayColors[0]), "Line width = intensity", "l");

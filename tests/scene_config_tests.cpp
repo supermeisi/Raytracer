@@ -92,14 +92,17 @@ int main() {
 
     const SceneConfig example =
         LoadSceneConfig(std::string(RAYTRACER_SOURCE_DIR) + "/scene.json");
-    Require(example.spheres.size() == 2,
-            "example scene should load both sphere objects");
-    Require(example.spheres[1].name == "Second glass sphere",
+    Require(example.objects.size() == 5,
+            "example scene should load all five optical objects");
+    Require(example.objects[1].name == "Second glass sphere",
             "object names should be loaded");
-    Require(example.spheres[1].center[0] == 4.5,
+    Require(example.objects[1].center[0] == 4.5,
             "object centers should be loaded");
-    Require(example.spheres[1].refractiveIndex == 1.33,
+    Require(example.objects[1].refractiveIndex == 1.33,
             "object refractive indices should be loaded");
+    Require(example.objects[0].shape == ObjectShape::Sphere &&
+                example.objects[0].radius == 3.0,
+            "sphere shape should be loaded");
     Require(example.rayCount == 500, "ray count should be loaded");
     Require(example.openingAngleDegrees == 60.0,
             "opening angle should be loaded");
@@ -107,8 +110,8 @@ int main() {
             "Fresnel branch threshold should be loaded");
     Require(example.maxBoundaryInteractions == 8,
             "boundary interaction limit should be loaded");
-    Require(example.workerCount == 0,
-            "zero worker count should select automatic concurrency");
+    Require(example.workerCount == 4,
+            "example scene worker count should be loaded");
     Require(example.detector.has_value(),
             "example scene should configure a plane detector");
     Require(example.detector->binsX == 100 && example.detector->binsY == 100,
@@ -152,6 +155,71 @@ int main() {
     Require(!LoadSceneConfig(detectorDisabledScene.Path().string())
                  .detector.has_value(),
             "scene should allow the detector to be omitted");
+
+    TemporaryScene additionalShapesScene(R"json({
+      "source":{"position":[0,0,-20],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":40,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "objects":[
+        {"type":"sphere","center":[0,0,0],"radius":1,
+         "refractive_index":1.5,"color":800},
+        {"type":"box","center":[10,0,0],"size":[2,4,6],
+         "refractive_index":1.4,"color":600},
+        {"type":"tube","center":[20,0,0],"radius":2,"height":6,
+         "refractive_index":1.3,"color":400},
+        {"type":"cone","center":[30,0,0],"bottom_radius":2,"top_radius":0.5,
+         "height":6,"refractive_index":1.6,"color":2}
+      ]
+    })json");
+    const SceneConfig additionalShapes =
+        LoadSceneConfig(additionalShapesScene.Path().string());
+    Require(additionalShapes.objects.size() == 4,
+            "sphere, box, tube, and cone should load together");
+    Require(additionalShapes.objects[1].shape == ObjectShape::Box &&
+                additionalShapes.objects[1].size ==
+                    std::array<double, 3>{2.0, 4.0, 6.0},
+            "box dimensions should be loaded");
+    Require(additionalShapes.objects[2].shape == ObjectShape::Tube &&
+                additionalShapes.objects[2].radius == 2.0 &&
+                additionalShapes.objects[2].size[2] == 6.0,
+            "tube radius and height should be loaded");
+    Require(additionalShapes.objects[3].shape == ObjectShape::Cone &&
+                additionalShapes.objects[3].radius == 2.0 &&
+                additionalShapes.objects[3].topRadius == 0.5,
+            "cone bottom and top radii should be loaded");
+
+    for (const ObjectDescription &object : additionalShapes.objects) {
+      if (object.shape == ObjectShape::Sphere) {
+        continue;
+      }
+      SceneConfig shapeScene = additionalShapes;
+      shapeScene.objects = {object};
+      shapeScene.objects[0].center = {0.0, 0.0, 0.0};
+      shapeScene.sourcePosition = {0.0, 0.0, -5.0};
+      shapeScene.pathLength = 10.0;
+      std::atomic<std::size_t> shapeProgress{0};
+      const std::vector<std::array<double, 3>> straightRay{{0.0, 0.0, 1.0}};
+      const auto shapeRays =
+          TraceRaysParallel(shapeScene, straightRay, 1, shapeProgress);
+      bool hitOpticalObject = false;
+      for (const auto &segment : shapeRays.front().segments) {
+        hitOpticalObject = hitOpticalObject || segment.objectIndex == 0;
+      }
+      Require(hitOpticalObject,
+              "box, tube, and cone should participate in ray tracing");
+
+      shapeScene.sourcePosition = {-5.0, 0.0, 0.0};
+      const std::vector<std::array<double, 3>> sideRay{{1.0, 0.0, 0.0}};
+      const auto sideRays =
+          TraceRaysParallel(shapeScene, sideRay, 1, shapeProgress);
+      bool hitSide = false;
+      for (const auto &segment : sideRays.front().segments) {
+        hitSide = hitSide || segment.objectIndex == 0;
+      }
+      Require(hitSide,
+              "box, tube, and cone side surfaces should intersect rays");
+    }
 
     const std::vector<std::array<double, 3>> directions =
         GenerateRayDirections(example);
@@ -213,7 +281,7 @@ int main() {
         const auto &serial = serialRays[ray].segments[segment];
         const auto &parallel = parallelRays[ray].segments[segment];
         Require(serial.start == parallel.start && serial.end == parallel.end &&
-                    serial.sphereIndex == parallel.sphereIndex &&
+                    serial.objectIndex == parallel.objectIndex &&
                     serial.intensity == parallel.intensity,
                 "thread count should not change traced ray results");
       }
@@ -249,6 +317,15 @@ int main() {
             "serial and parallel detector histograms should match");
 
     Require(FailsToLoad("{"), "malformed JSON should be rejected");
+    Require(FailsToLoad(R"json({
+      "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8},
+      "objects":[{"type":"box","center":[0,0,0],"size":[2,0,2],
+                  "refractive_index":1.5,"color":800}]
+    })json"),
+            "box dimensions must be positive");
     Require(FailsToLoad(R"json({
       "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
                 "opening_angle_degrees":0},

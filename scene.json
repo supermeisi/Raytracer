@@ -38,6 +38,33 @@
       "radius": 1.2,
       "refractive_index": 1.33,
       "color": 600
+    },
+    {
+      "type": "box",
+      "name": "Optical glass block",
+      "center": [-5.0, 0.0, 0.0],
+      "size": [2.0, 2.0, 2.0],
+      "refractive_index": 1.52,
+      "color": 418
+    },
+    {
+      "type": "tube",
+      "name": "Cylindrical lens",
+      "center": [0.0, 5.0, 0.0],
+      "radius": 1.0,
+      "height": 3.0,
+      "refractive_index": 1.49,
+      "color": 432
+    },
+    {
+      "type": "cone",
+      "name": "Tapered lens",
+      "center": [4.0, 5.0, 0.0],
+      "bottom_radius": 1.0,
+      "top_radius": 0.4,
+      "height": 3.0,
+      "refractive_index": 1.5,
+      "color": 800
     }
   ]
 }

@@ -8,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -44,6 +45,22 @@ double DistanceSquared(const std::array<double, 3> &left,
   return distanceSquared;
 }
 
+double BoundingRadius(const ObjectDescription &object) {
+  switch (object.shape) {
+  case ObjectShape::Sphere:
+    return object.radius;
+  case ObjectShape::Box:
+    return std::hypot(object.size[0] * 0.5, object.size[1] * 0.5,
+                      object.size[2] * 0.5);
+  case ObjectShape::Tube:
+    return std::hypot(object.radius, object.size[2] * 0.5);
+  case ObjectShape::Cone:
+    return std::hypot(std::max(object.radius, object.topRadius),
+                      object.size[2] * 0.5);
+  }
+  throw std::runtime_error("unknown optical object shape");
+}
+
 void ValidateScene(const SceneConfig &scene) {
   if (scene.rayCount < 1 || scene.rayCount > 10000) {
     throw std::runtime_error("source.ray_count must be between 1 and 10000");
@@ -74,8 +91,8 @@ void ValidateScene(const SceneConfig &scene) {
     throw std::runtime_error(
         "optics.worker_count must be between 0 (automatic) and 256");
   }
-  if (scene.spheres.empty()) {
-    throw std::runtime_error("objects must contain at least one sphere");
+  if (scene.objects.empty()) {
+    throw std::runtime_error("objects must contain at least one optical object");
   }
 
   if (scene.detector) {
@@ -115,29 +132,48 @@ void ValidateScene(const SceneConfig &scene) {
     }
   }
 
-  for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
-    const SphereDescription &sphere = scene.spheres[i];
-    if (sphere.radius <= 0.0) {
-      throw std::runtime_error("objects[" + std::to_string(i) +
-                               "].radius must be greater than 0");
+  for (std::size_t i = 0; i < scene.objects.size(); ++i) {
+    const ObjectDescription &object = scene.objects[i];
+    const std::string prefix = "objects[" + std::to_string(i) + "]";
+    if (object.shape == ObjectShape::Sphere && object.radius <= 0.0) {
+      throw std::runtime_error(prefix + ".radius must be greater than 0");
     }
-    if (sphere.refractiveIndex <= 0.0) {
+    if (object.shape == ObjectShape::Box &&
+        (object.size[0] <= 0.0 || object.size[1] <= 0.0 ||
+         object.size[2] <= 0.0)) {
+      throw std::runtime_error(prefix + ".size values must be greater than 0");
+    }
+    if ((object.shape == ObjectShape::Tube ||
+         object.shape == ObjectShape::Cone) &&
+        (object.size[2] <= 0.0 || object.radius < 0.0 ||
+         object.topRadius < 0.0 ||
+         (object.shape == ObjectShape::Tube && object.radius <= 0.0) ||
+         (object.shape == ObjectShape::Cone &&
+          object.radius + object.topRadius <= 0.0))) {
+      throw std::runtime_error(
+          prefix + " requires a positive height and valid radii");
+    }
+    if (object.refractiveIndex <= 0.0) {
       throw std::runtime_error("objects[" + std::to_string(i) +
                                "].refractive_index must be greater than 0");
     }
     const double sourceDistanceSquared =
-        DistanceSquared(scene.sourcePosition, sphere.center);
-    if (sourceDistanceSquared <= sphere.radius * sphere.radius) {
-      throw std::runtime_error("source.position must be outside every sphere");
+        DistanceSquared(scene.sourcePosition, object.center);
+    const double objectBound = BoundingRadius(object);
+    if (sourceDistanceSquared <= objectBound * objectBound) {
+      throw std::runtime_error(
+          "source.position must be outside every optical object's bounding "
+          "sphere");
     }
 
     for (std::size_t j = 0; j < i; ++j) {
-      const SphereDescription &other = scene.spheres[j];
-      const double minDistance = sphere.radius + other.radius;
-      if (DistanceSquared(sphere.center, other.center) <=
+      const ObjectDescription &other = scene.objects[j];
+      const double minDistance = objectBound + BoundingRadius(other);
+      if (DistanceSquared(object.center, other.center) <=
           minDistance * minDistance) {
         throw std::runtime_error(
-            "sphere interiors must not overlap or touch (objects[" +
+            "optical object bounding spheres must not overlap or touch "
+            "(objects[" +
             std::to_string(j) + "] and objects[" + std::to_string(i) + "])");
       }
     }
@@ -209,22 +245,33 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
       throw std::runtime_error("objects must be a JSON array");
     }
     if (objects.size() > 256) {
-      throw std::runtime_error("objects may contain at most 256 spheres");
+      throw std::runtime_error("objects may contain at most 256 optical objects");
     }
 
-    scene.spheres.reserve(objects.size());
+    scene.objects.reserve(objects.size());
     for (std::size_t i = 0; i < objects.size(); ++i) {
       const Json &object = objects[i];
       const std::string prefix = "objects[" + std::to_string(i) + "]";
       if (!object.is_object()) {
         throw std::runtime_error(prefix + " must be a JSON object");
       }
-      if (object.at("type").get<std::string>() != "sphere") {
-        throw std::runtime_error(prefix + ".type must be \"sphere\"");
+      const std::string type = object.at("type").get<std::string>();
+      ObjectShape shape;
+      if (type == "sphere") {
+        shape = ObjectShape::Sphere;
+      } else if (type == "box") {
+        shape = ObjectShape::Box;
+      } else if (type == "tube") {
+        shape = ObjectShape::Tube;
+      } else if (type == "cone") {
+        shape = ObjectShape::Cone;
+      } else {
+        throw std::runtime_error(prefix +
+                                 ".type must be sphere, box, tube, or cone");
       }
 
       const std::string name =
-          object.value("name", "Sphere " + std::to_string(i + 1));
+          object.value("name", type + " " + std::to_string(i + 1));
       const Json &colorValue = object.at("color");
       if (!colorValue.is_number_integer()) {
         throw std::runtime_error(prefix + ".color must be an integer ROOT "
@@ -236,12 +283,36 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
             prefix + ".color is outside the ROOT color index range");
       }
 
-      scene.spheres.push_back(
-          {name, ReadVector3(object.at("center"), prefix + ".center"),
-           ReadFiniteNumber(object.at("radius"), prefix + ".radius"),
-           ReadFiniteNumber(object.at("refractive_index"),
-                            prefix + ".refractive_index"),
-           color});
+      ObjectDescription description{name, shape,
+                                    ReadVector3(object.at("center"),
+                                                prefix + ".center"),
+                                    {0.0, 0.0, 0.0},
+                                    0.0,
+                                    0.0,
+                                    ReadFiniteNumber(object.at("refractive_index"),
+                                                     prefix + ".refractive_index"),
+                                    color};
+      if (shape == ObjectShape::Sphere || shape == ObjectShape::Tube) {
+        description.radius =
+            ReadFiniteNumber(object.at("radius"), prefix + ".radius");
+      }
+      if (shape == ObjectShape::Sphere) {
+        description.size = {2.0 * description.radius, 2.0 * description.radius,
+                            2.0 * description.radius};
+      } else if (shape == ObjectShape::Box) {
+        description.size = ReadVector3(object.at("size"), prefix + ".size");
+      } else if (shape == ObjectShape::Tube) {
+        description.size[2] =
+            ReadFiniteNumber(object.at("height"), prefix + ".height");
+      } else {
+        description.radius = ReadFiniteNumber(object.at("bottom_radius"),
+                                              prefix + ".bottom_radius");
+        description.topRadius = ReadFiniteNumber(
+            object.at("top_radius"), prefix + ".top_radius");
+        description.size[2] =
+            ReadFiniteNumber(object.at("height"), prefix + ".height");
+      }
+      scene.objects.push_back(std::move(description));
     }
 
     if (root.contains("detector") && !root.at("detector").is_null()) {

@@ -1,7 +1,7 @@
 # ROOT 3D Ray Tracer
 
 This ROOT application traces a configurable beam of light rays from a point
-source through a transparent glass scene. It uses Snell's law at sphere
+source through a transparent glass scene. It uses Snell's law at optical object
 boundaries, reflects rays that undergo total internal reflection, and displays
 the ray paths and wireframe objects in an interactive 3D ROOT canvas.
 
@@ -29,7 +29,7 @@ Pass another scene description to load it instead:
 
 The JSON scene format configures the source position and beam, path length,
 Fresnel branching controls, an optional finite plane detector, and an array of
-non-overlapping spheres. The source's `ray_count` sets the exact number of
+non-overlapping optical objects. The source's `ray_count` sets the exact number of
 rays, `direction` aims the center ray, and `opening_angle_degrees` sets the full
 cone angle (from 0 to 180 degrees). Rays are distributed over the cone using a
 deterministic spiral pattern, with the first ray following the configured
@@ -37,8 +37,9 @@ direction. The `optics.worker_count` setting controls the number of tracing
 threads: `0` (the default) uses the available hardware concurrency, and a
 positive value selects an explicit worker count from 1 to 256. The terminal
 shows the percentage and count of source rays completed; all ROOT drawing
-remains on the main thread. Each sphere has a center, radius, refractive index,
-and ROOT color index.
+remains on the main thread. Every object has a center, refractive index, and
+ROOT color index. Supported shapes are spheres, axis-aligned boxes, solid
+cylindrical tubes, and conical frustums; tube and cone axes are along Z.
 
 The detector has a center, surface normal, in-plane `u_axis`, physical width
 and height, histogram bin counts, and outline color. The `u_axis` is projected
@@ -80,6 +81,33 @@ the 3D scene, with the ROOT `COLZ` histogram in a second canvas.
       "radius": 3,
       "refractive_index": 1.5,
       "color": 800
+    },
+    {
+      "type": "box",
+      "name": "Glass block",
+      "center": [5, 0, 0],
+      "size": [2, 3, 4],
+      "refractive_index": 1.52,
+      "color": 418
+    },
+    {
+      "type": "tube",
+      "name": "Cylindrical lens",
+      "center": [0, 5, 0],
+      "radius": 1,
+      "height": 3,
+      "refractive_index": 1.49,
+      "color": 432
+    },
+    {
+      "type": "cone",
+      "name": "Tapered lens",
+      "center": [-5, 0, 0],
+      "bottom_radius": 1.5,
+      "top_radius": 0.5,
+      "height": 3,
+      "refractive_index": 1.5,
+      "color": 800
     }
   ]
 }
@@ -87,10 +115,16 @@ the 3D scene, with the ROOT `COLZ` histogram in a second canvas.
 
 Set `"detector": null` or omit `detector` to disable detection. Detector bin
 counts must be between 1 and 1000 per axis, with at most 1,000,000 bins total.
-Only spheres are currently supported as optical objects. Spheres may not
-overlap or touch, and the source must be outside every sphere. The direction
-vector is normalized automatically. Ray count is limited to 1–10000. The 3D
-view can be rotated with the mouse.
+Spheres use `radius`; boxes use full `size` along X/Y/Z; tubes use `radius` and
+`height`; cones use `bottom_radius`, `top_radius`, and `height` (set either
+radius to zero for a pointed end). Tubes and cones are centered on `center`,
+with their bases at `center.z - height/2` and `center.z + height/2`.
+Dimensions must be positive (cone radii may be zero, but not both). Objects
+must not overlap or touch; overlap validation uses their bounding spheres, so
+some separated shapes with overlapping bounding spheres may also be rejected.
+The source must be outside every object's bounding sphere. The direction vector
+is normalized automatically. Ray count is limited to 1–10000. The 3D view can
+be rotated with the mouse.
 
 Run the JSON loader tests with `ctest --test-dir build --output-on-failure`.
 

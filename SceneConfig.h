@@ -6,10 +6,15 @@
 #include <string>
 #include <vector>
 
-struct SphereDescription {
+enum class ObjectShape { Sphere, Box, Tube, Cone };
+
+struct ObjectDescription {
   std::string name;
+  ObjectShape shape;
   std::array<double, 3> center;
+  std::array<double, 3> size;
   double radius;
+  double topRadius;
   double refractiveIndex;
   int color;
 };
@@ -35,7 +40,7 @@ struct SceneConfig {
   double minimumBranchIntensity;
   int maxBoundaryInteractions;
   int workerCount;
-  std::vector<SphereDescription> spheres;
+  std::vector<ObjectDescription> objects;
   std::optional<PlaneDetectorDescription> detector;
 };
 

@@ -41,32 +41,158 @@ struct RayState {
   Vector origin;
   Vector direction;
   double travelled;
-  int currentSphere;
+  int currentObject;
   double intensity;
   int boundaryInteractions;
 };
 
-bool IntersectSphere(const Vector &origin, const Vector &direction,
-                     const Vector &center, double radius, double &distance,
-                     Vector &normal) {
-  const Vector offset = Subtract(origin, center);
-  const double halfB = Dot(offset, direction);
-  const double c = Dot(offset, offset) - radius * radius;
-  const double discriminant = halfB * halfB - c;
-  if (discriminant < 0.0) {
-    return false;
+bool IntersectObject(const ObjectDescription &object, const Vector &origin,
+                     const Vector &direction, double &distance, Vector &normal) {
+  const Vector localOrigin = Subtract(origin, object.center);
+  double nearest = std::numeric_limits<double>::infinity();
+  Vector nearestNormal{};
+  auto consider = [&](double candidate, const Vector &candidateNormal) {
+    if (candidate > kSurfaceEpsilon && candidate < nearest) {
+      nearest = candidate;
+      nearestNormal = Unit(candidateNormal);
+    }
+  };
+
+  if (object.shape == ObjectShape::Box) {
+    double nearDistance = -std::numeric_limits<double>::infinity();
+    double farDistance = std::numeric_limits<double>::infinity();
+    Vector nearNormal{};
+    Vector farNormal{};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double halfSize = object.size[axis] * 0.5;
+      if (std::abs(direction[axis]) <= 1e-14) {
+        if (localOrigin[axis] < -halfSize || localOrigin[axis] > halfSize) {
+          return false;
+        }
+        continue;
+      }
+      double first = (-halfSize - localOrigin[axis]) / direction[axis];
+      double second = (halfSize - localOrigin[axis]) / direction[axis];
+      Vector firstNormal{};
+      Vector secondNormal{};
+      firstNormal[axis] = -1.0;
+      secondNormal[axis] = 1.0;
+      if (first > second) {
+        std::swap(first, second);
+        std::swap(firstNormal, secondNormal);
+      }
+      if (first > nearDistance) {
+        nearDistance = first;
+        nearNormal = firstNormal;
+      }
+      if (second < farDistance) {
+        farDistance = second;
+        farNormal = secondNormal;
+      }
+      if (nearDistance > farDistance) {
+        return false;
+      }
+    }
+    if (nearDistance > kSurfaceEpsilon) {
+      consider(nearDistance, nearNormal);
+    } else {
+      consider(farDistance, farNormal);
+    }
+  } else if (object.shape == ObjectShape::Sphere) {
+    const double halfB = Dot(localOrigin, direction);
+    const double c = Dot(localOrigin, localOrigin) -
+                     object.radius * object.radius;
+    const double discriminant = halfB * halfB - c;
+    if (discriminant < 0.0) {
+      return false;
+    }
+    const double root = std::sqrt(discriminant);
+    const double nearDistance = -halfB - root;
+    const double farDistance = -halfB + root;
+    const double candidate =
+        nearDistance > kSurfaceEpsilon ? nearDistance : farDistance;
+    if (candidate <= kSurfaceEpsilon) {
+      return false;
+    }
+    const Vector hit = Add(localOrigin, Scale(direction, candidate));
+    consider(candidate, Scale(hit, 1.0 / object.radius));
+  } else {
+    const double halfHeight = object.size[2] * 0.5;
+    const bool isTube = object.shape == ObjectShape::Tube;
+    const double slope =
+        isTube ? 0.0 : (object.topRadius - object.radius) / object.size[2];
+    const double intercept = isTube ? object.radius
+                                    : object.radius + slope * halfHeight;
+    const double radialA = direction[0] * direction[0] +
+                           direction[1] * direction[1];
+    const double radialB = 2.0 * (localOrigin[0] * direction[0] +
+                                  localOrigin[1] * direction[1]);
+    const double radialC = localOrigin[0] * localOrigin[0] +
+                           localOrigin[1] * localOrigin[1];
+    const double a = radialA - slope * slope * direction[2] * direction[2];
+    const double b = radialB -
+                     2.0 * slope * direction[2] *
+                         (slope * localOrigin[2] + intercept);
+    const double c =
+        radialC - std::pow(slope * localOrigin[2] + intercept, 2.0);
+    if (std::abs(a) <= 1e-14) {
+      if (std::abs(b) > 1e-14) {
+        const double t = -c / b;
+        const Vector hit = Add(localOrigin, Scale(direction, t));
+        if (hit[2] >= -halfHeight - kSurfaceEpsilon &&
+            hit[2] <= halfHeight + kSurfaceEpsilon) {
+          const double radius = slope * hit[2] + intercept;
+          Vector sideNormal{hit[0], hit[1], -radius * slope};
+          if (std::hypot(hit[0], hit[1]) <= kSurfaceEpsilon &&
+              std::abs(slope) > 1e-14) {
+            sideNormal = {0.0, 0.0, -slope};
+          }
+          consider(t, sideNormal);
+        }
+      }
+    } else {
+      const double discriminant = b * b - 4.0 * a * c;
+      if (discriminant >= 0.0) {
+        const double root = std::sqrt(discriminant);
+        for (double t : {(-b - root) / (2.0 * a),
+                         (-b + root) / (2.0 * a)}) {
+          const Vector hit = Add(localOrigin, Scale(direction, t));
+          if (hit[2] >= -halfHeight - kSurfaceEpsilon &&
+              hit[2] <= halfHeight + kSurfaceEpsilon) {
+            const double radius = slope * hit[2] + intercept;
+            Vector sideNormal{hit[0], hit[1], -radius * slope};
+            if (std::hypot(hit[0], hit[1]) <= kSurfaceEpsilon &&
+                std::abs(slope) > 1e-14) {
+              sideNormal = {0.0, 0.0, -slope};
+            }
+            consider(t, sideNormal);
+          }
+        }
+      }
+    }
+
+    for (int side : {-1, 1}) {
+      if (std::abs(direction[2]) <= 1e-14) {
+        continue;
+      }
+      const double z = side * halfHeight;
+      const double t = (z - localOrigin[2]) / direction[2];
+      const double x = localOrigin[0] + t * direction[0];
+      const double y = localOrigin[1] + t * direction[1];
+      const double radius = side < 0 ? object.radius
+                                     : (isTube ? object.radius
+                                               : object.topRadius);
+      if (x * x + y * y <= radius * radius + kSurfaceEpsilon) {
+        consider(t, {0.0, 0.0, static_cast<double>(side)});
+      }
+    }
   }
 
-  const double root = std::sqrt(discriminant);
-  const double nearDistance = -halfB - root;
-  const double farDistance = -halfB + root;
-  distance = nearDistance > kSurfaceEpsilon ? nearDistance : farDistance;
-  if (distance <= kSurfaceEpsilon) {
+  if (!std::isfinite(nearest)) {
     return false;
   }
-
-  normal = Scale(Subtract(Add(origin, Scale(direction, distance)), center),
-                 1.0 / radius);
+  distance = nearest;
+  normal = nearestNormal;
   return true;
 }
 
@@ -85,65 +211,65 @@ TracedRay TraceRay(const SceneConfig &scene, const Vector &source,
       double hitDistance = 0.0;
       Vector outwardNormal{};
       const double remaining = scene.pathLength - state.travelled;
-      int hitSphere = -1;
-      if (state.currentSphere >= 0) {
-        const SphereDescription &sphere = scene.spheres[state.currentSphere];
-        if (IntersectSphere(state.origin, state.direction, sphere.center,
-                            sphere.radius, hitDistance, outwardNormal)) {
-          hitSphere = state.currentSphere;
+      int hitObject = -1;
+      if (state.currentObject >= 0) {
+        const ObjectDescription &object = scene.objects[state.currentObject];
+        if (IntersectObject(object, state.origin, state.direction, hitDistance,
+                            outwardNormal)) {
+          hitObject = state.currentObject;
         }
       } else {
         hitDistance = std::numeric_limits<double>::infinity();
-        for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
+        for (std::size_t i = 0; i < scene.objects.size(); ++i) {
           double candidateDistance = 0.0;
           Vector candidateNormal{};
-          const SphereDescription &sphere = scene.spheres[i];
-          if (IntersectSphere(state.origin, state.direction, sphere.center,
-                              sphere.radius, candidateDistance,
-                              candidateNormal) &&
+          const ObjectDescription &object = scene.objects[i];
+          if (IntersectObject(object, state.origin, state.direction,
+                              candidateDistance, candidateNormal) &&
               candidateDistance < hitDistance) {
             hitDistance = candidateDistance;
             outwardNormal = candidateNormal;
-            hitSphere = static_cast<int>(i);
+            hitObject = static_cast<int>(i);
           }
         }
       }
 
       if (detector != nullptr) {
         const double maxDistance =
-            hitSphere >= 0 ? std::min(remaining, hitDistance) : remaining;
+            hitObject >= 0 ? std::min(remaining, hitDistance) : remaining;
         const auto detectorHit =
             detector->Intersect(state.origin, state.direction, maxDistance);
         if (detectorHit) {
           const Vector hit = Add(state.origin,
                                  Scale(state.direction, detectorHit->distance));
           result.segments.push_back(
-              {state.origin, hit, state.currentSphere, state.intensity});
+              {state.origin, hit, state.currentObject, state.intensity});
           result.detectorHit = *detectorHit;
           result.detectorIntensity = state.intensity;
           break;
         }
       }
 
-      if (hitSphere < 0 || hitDistance >= remaining) {
+      if (hitObject < 0 || hitDistance >= remaining) {
         result.segments.push_back(
             {state.origin, Add(state.origin, Scale(state.direction, remaining)),
-             state.currentSphere, state.intensity});
+             state.currentObject, state.intensity});
         break;
       }
 
       const Vector hit = Add(state.origin, Scale(state.direction, hitDistance));
       result.segments.push_back(
-          {state.origin, hit, state.currentSphere, state.intensity});
+          {state.origin, hit, state.currentObject, state.intensity});
       state.travelled += hitDistance;
-      const bool entering = state.currentSphere < 0;
+      const bool entering = state.currentObject < 0;
       const Vector normalAgainstRay =
           entering ? outwardNormal : Scale(outwardNormal, -1.0);
-      const int transmittedSphere = entering ? hitSphere : -1;
+      const int transmittedObject = entering ? hitObject : -1;
       const double incidentIndex =
-          entering ? 1.0 : scene.spheres[state.currentSphere].refractiveIndex;
+          entering ? 1.0
+                   : scene.objects[state.currentObject].refractiveIndex;
       const double transmittedIndex =
-          entering ? scene.spheres[transmittedSphere].refractiveIndex : 1.0;
+          entering ? scene.objects[transmittedObject].refractiveIndex : 1.0;
       const FresnelSplit split = ComputeFresnelSplit(
           state.direction, normalAgainstRay, incidentIndex, transmittedIndex);
 
@@ -166,7 +292,7 @@ TracedRay TraceRay(const SceneConfig &scene, const Vector &source,
         transmitted.direction = split.transmittedDirection;
         transmitted.origin =
             Add(hit, Scale(transmitted.direction, kSurfaceEpsilon));
-        transmitted.currentSphere = transmittedSphere;
+        transmitted.currentObject = transmittedObject;
         transmitted.travelled += kSurfaceEpsilon;
         transmitted.intensity = transmittedIntensity;
         pending.push_back(transmitted);

@@ -13,7 +13,7 @@
 struct TracedRaySegment {
   std::array<double, 3> start;
   std::array<double, 3> end;
-  int sphereIndex;
+  int objectIndex;
   double intensity;
 };
 
