@@ -8,7 +8,8 @@
   "path_length": 20.0,
   "optics": {
     "minimum_branch_intensity": 0.01,
-    "max_boundary_interactions": 8
+    "max_boundary_interactions": 8,
+    "worker_count": 4
   },
   "detector": {
     "name": "Exit plane detector",

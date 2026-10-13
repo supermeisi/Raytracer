@@ -1,7 +1,7 @@
 #include "SceneConfig.h"
 
 #include "Detector.h"
-#include "Fresnel.h"
+#include "RayTracingEngine.h"
 
 #include <TCanvas.h>
 #include <TColor.h>
@@ -16,32 +16,19 @@
 #include <TView.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <future>
+#include <iostream>
 #include <limits>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace {
 
-constexpr double kSurfaceEpsilon = 1e-5;
-
-struct RaySegment {
-  TVector3 start;
-  TVector3 end;
-  int sphereIndex;
-  double intensity;
-};
-
-using RayPath = std::vector<RaySegment>;
-
-struct RayState {
-  TVector3 origin;
-  TVector3 direction;
-  double travelled;
-  int currentSphere;
-  double intensity;
-  int boundaryInteractions;
-};
+using RaySegment = TracedRaySegment;
 
 struct SceneBounds {
   TVector3 minimum{std::numeric_limits<double>::infinity(),
@@ -66,144 +53,8 @@ struct SceneBounds {
   }
 };
 
-bool IntersectSphere(const TVector3 &origin, const TVector3 &direction,
-                     const TVector3 &center, double radius, double &distance,
-                     TVector3 &normal) {
-  const TVector3 offset = origin - center;
-  const double halfB = offset.Dot(direction);
-  const double c = offset.Mag2() - radius * radius;
-  const double discriminant = halfB * halfB - c;
-  if (discriminant < 0.0) {
-    return false;
-  }
-
-  const double root = std::sqrt(discriminant);
-  double nearDistance = -halfB - root;
-  double farDistance = -halfB + root;
-  distance = nearDistance > kSurfaceEpsilon ? nearDistance : farDistance;
-  if (distance <= kSurfaceEpsilon) {
-    return false;
-  }
-
-  normal = (origin + direction * distance - center) * (1.0 / radius);
-  return true;
-}
-
 TVector3 ToVector3(const std::array<double, 3> &vector) {
   return TVector3(vector[0], vector[1], vector[2]);
-}
-
-RayPath TraceRay(const TVector3 &source, TVector3 direction,
-                 const SceneConfig &scene,
-                 PlaneDetectorHistogram *detectorHistogram) {
-  std::vector<RayState> pending;
-  pending.push_back({source, direction.Unit(), 0.0, -1, 1.0, 0});
-  RayPath paths;
-
-  while (!pending.empty()) {
-    RayState state = pending.back();
-    pending.pop_back();
-    while (state.travelled < scene.pathLength &&
-           state.boundaryInteractions < scene.maxBoundaryInteractions) {
-      double hitDistance = 0.0;
-      TVector3 outwardNormal;
-      const double remaining = scene.pathLength - state.travelled;
-      int hitSphere = -1;
-      if (state.currentSphere >= 0) {
-        const SphereDescription &sphere = scene.spheres[state.currentSphere];
-        if (IntersectSphere(state.origin, state.direction,
-                            ToVector3(sphere.center), sphere.radius,
-                            hitDistance, outwardNormal)) {
-          hitSphere = state.currentSphere;
-        }
-      } else {
-        hitDistance = std::numeric_limits<double>::infinity();
-        for (std::size_t i = 0; i < scene.spheres.size(); ++i) {
-          double candidateDistance = 0.0;
-          TVector3 candidateNormal;
-          const SphereDescription &sphere = scene.spheres[i];
-          if (IntersectSphere(state.origin, state.direction,
-                              ToVector3(sphere.center), sphere.radius,
-                              candidateDistance, candidateNormal) &&
-              candidateDistance < hitDistance) {
-            hitDistance = candidateDistance;
-            outwardNormal = candidateNormal;
-            hitSphere = static_cast<int>(i);
-          }
-        }
-      }
-
-      if (detectorHistogram != nullptr) {
-        const double maxDistance =
-            hitSphere >= 0 ? std::min(remaining, hitDistance) : remaining;
-        const auto detectorHit = detectorHistogram->Intersect(
-            {state.origin.X(), state.origin.Y(), state.origin.Z()},
-            {state.direction.X(), state.direction.Y(), state.direction.Z()},
-            maxDistance);
-        if (detectorHit) {
-          const TVector3 hit =
-              state.origin + state.direction * detectorHit->distance;
-          paths.push_back(
-              {state.origin, hit, state.currentSphere, state.intensity});
-          detectorHistogram->Record(*detectorHit, state.intensity);
-          break;
-        }
-      }
-
-      if (hitSphere < 0 || hitDistance >= remaining) {
-        paths.push_back({state.origin,
-                         state.origin + state.direction * remaining,
-                         state.currentSphere, state.intensity});
-        break;
-      }
-
-      const TVector3 hit = state.origin + state.direction * hitDistance;
-      paths.push_back(
-          {state.origin, hit, state.currentSphere, state.intensity});
-      state.travelled += hitDistance;
-      const bool entering = state.currentSphere < 0;
-      const TVector3 normalAgainstRay =
-          entering ? outwardNormal : -outwardNormal;
-      const int transmittedSphere = entering ? hitSphere : -1;
-      const double incidentIndex =
-          entering ? 1.0 : scene.spheres[state.currentSphere].refractiveIndex;
-      const double transmittedIndex =
-          entering ? scene.spheres[transmittedSphere].refractiveIndex : 1.0;
-      const FresnelSplit split = ComputeFresnelSplit(
-          {state.direction.X(), state.direction.Y(), state.direction.Z()},
-          {normalAgainstRay.X(), normalAgainstRay.Y(), normalAgainstRay.Z()},
-          incidentIndex, transmittedIndex);
-
-      ++state.boundaryInteractions;
-      const double reflectedIntensity = state.intensity * split.reflectance;
-      if (reflectedIntensity >= scene.minimumBranchIntensity) {
-        RayState reflected = state;
-        reflected.direction =
-            TVector3(split.reflectedDirection[0], split.reflectedDirection[1],
-                     split.reflectedDirection[2]);
-        reflected.origin = hit + reflected.direction * kSurfaceEpsilon;
-        reflected.travelled += kSurfaceEpsilon;
-        reflected.intensity = reflectedIntensity;
-        pending.push_back(reflected);
-      }
-
-      const double transmittedIntensity = state.intensity * split.transmittance;
-      if (split.hasTransmission &&
-          transmittedIntensity >= scene.minimumBranchIntensity) {
-        RayState transmitted = state;
-        transmitted.direction = TVector3(split.transmittedDirection[0],
-                                         split.transmittedDirection[1],
-                                         split.transmittedDirection[2]);
-        transmitted.origin = hit + transmitted.direction * kSurfaceEpsilon;
-        transmitted.currentSphere = transmittedSphere;
-        transmitted.travelled += kSurfaceEpsilon;
-        transmitted.intensity = transmittedIntensity;
-        pending.push_back(transmitted);
-      }
-    }
-  }
-
-  return paths;
 }
 
 void DrawDetectorPlane(const PlaneDetectorDescription &detector,
@@ -295,8 +146,8 @@ void DrawSphereWireframe(const TVector3 &center, double radius, Color_t color) {
 void DrawSegment(const RaySegment &segment, Color_t outsideColor,
                  const SceneConfig &scene, SceneBounds &bounds) {
   TPolyLine3D *line = new TPolyLine3D(2);
-  line->SetPoint(0, segment.start.X(), segment.start.Y(), segment.start.Z());
-  line->SetPoint(1, segment.end.X(), segment.end.Y(), segment.end.Z());
+  line->SetPoint(0, segment.start[0], segment.start[1], segment.start[2]);
+  line->SetPoint(1, segment.end[0], segment.end[1], segment.end[2]);
   const Color_t color = segment.sphereIndex >= 0
                             ? scene.spheres[segment.sphereIndex].color
                             : outsideColor;
@@ -305,8 +156,15 @@ void DrawSegment(const RaySegment &segment, Color_t outsideColor,
       1,
       static_cast<int>(std::lround(1.0 + 4.0 * std::sqrt(segment.intensity)))));
   line->Draw("same");
-  bounds.Include(segment.start);
-  bounds.Include(segment.end);
+  bounds.Include(ToVector3(segment.start));
+  bounds.Include(ToVector3(segment.end));
+}
+
+void PrintProgress(std::size_t completed, std::size_t total) {
+  const int percentage =
+      total == 0 ? 100 : static_cast<int>(100 * completed / total);
+  std::cout << "\rTracing rays: " << percentage << "% (" << completed << "/"
+            << total << ")" << std::flush;
 }
 
 TPolyLine3D *MakeLegendLine(Color_t color) {
@@ -348,12 +206,42 @@ void raytracer(const SceneConfig &scene) {
 
   const std::vector<std::array<double, 3>> rayDirections =
       GenerateRayDirections(scene);
-  for (std::size_t rayIndex = 0; rayIndex < rayDirections.size(); ++rayIndex) {
-    const RayPath path = TraceRay(source, ToVector3(rayDirections[rayIndex]),
-                                  scene, detectorHistogram.get());
+  std::atomic<std::size_t> completedRayCount{0};
+  auto tracing = std::async(std::launch::async, [&] {
+    return TraceRaysParallel(scene, rayDirections, scene.workerCount,
+                             completedRayCount);
+  });
+  PrintProgress(0, rayDirections.size());
+  int lastDisplayedPercentage = 0;
+  auto lastProgressUpdate = std::chrono::steady_clock::now();
+  while (tracing.wait_for(std::chrono::milliseconds(0)) !=
+         std::future_status::ready) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastProgressUpdate >= std::chrono::milliseconds(100)) {
+      const std::size_t completed =
+          completedRayCount.load(std::memory_order_relaxed);
+      const int percentage = static_cast<int>(
+          100 * completed / rayDirections.size());
+      if (percentage != lastDisplayedPercentage) {
+        PrintProgress(completed, rayDirections.size());
+        lastDisplayedPercentage = percentage;
+      }
+      lastProgressUpdate = now;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const std::vector<TracedRay> tracedRays = tracing.get();
+  PrintProgress(rayDirections.size(), rayDirections.size());
+  std::cout << '\n';
+
+  for (std::size_t rayIndex = 0; rayIndex < tracedRays.size(); ++rayIndex) {
+    const TracedRay &ray = tracedRays[rayIndex];
     const Color_t color = rayColors[rayIndex % 7];
-    for (const RaySegment &segment : path) {
+    for (const RaySegment &segment : ray.segments) {
       DrawSegment(segment, color, scene, bounds);
+    }
+    if (detectorHistogram && ray.detectorHit) {
+      detectorHistogram->Record(*ray.detectorHit, ray.detectorIntensity);
     }
   }
 

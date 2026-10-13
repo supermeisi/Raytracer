@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ROOT CONFIG REQUIRED COMPONENTS Core Graf Graf3d Gpad Hist Physics)
 find_package(nlohmann_json 3.2.0 CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
 add_executable(raytracer
   raytracer.C
@@ -15,6 +16,7 @@ add_executable(raytracer
   SceneConfig.cpp
   Fresnel.cpp
   Detector.cpp
+  RayTracingEngine.cpp
 )
 
 target_link_libraries(raytracer PRIVATE
@@ -25,6 +27,7 @@ target_link_libraries(raytracer PRIVATE
   ROOT::Hist
   ROOT::Physics
   nlohmann_json::nlohmann_json
+  Threads::Threads
 )
 
 configure_file(scene.json scene.json COPYONLY)
@@ -35,12 +38,16 @@ if(BUILD_TESTING)
     SceneConfig.cpp
     Fresnel.cpp
     Detector.cpp
+    RayTracingEngine.cpp
     tests/scene_config_tests.cpp
   )
   target_include_directories(scene_config_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
   )
-  target_link_libraries(scene_config_tests PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(scene_config_tests PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+  )
   target_compile_definitions(scene_config_tests PRIVATE
     RAYTRACER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
   )

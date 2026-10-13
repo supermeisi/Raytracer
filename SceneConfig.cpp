@@ -70,6 +70,10 @@ void ValidateScene(const SceneConfig &scene) {
     throw std::runtime_error(
         "optics.max_boundary_interactions must be between 1 and 12");
   }
+  if (scene.workerCount < 0 || scene.workerCount > 256) {
+    throw std::runtime_error(
+        "optics.worker_count must be between 0 (automatic) and 256");
+  }
   if (scene.spheres.empty()) {
     throw std::runtime_error("objects must contain at least one sphere");
   }
@@ -179,6 +183,13 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
       throw std::runtime_error(
           "optics.max_boundary_interactions must be an integer");
     }
+    int workerCount = 0;
+    if (optics.contains("worker_count")) {
+      if (!optics.at("worker_count").is_number_integer()) {
+        throw std::runtime_error("optics.worker_count must be an integer");
+      }
+      workerCount = optics.at("worker_count").get<int>();
+    }
 
     SceneConfig scene{ReadVector3(source.at("position"), "source.position"),
                       ReadVector3(source.at("direction"), "source.direction"),
@@ -189,6 +200,7 @@ SceneConfig LoadSceneConfig(const std::string &filePath) {
                       ReadFiniteNumber(optics.at("minimum_branch_intensity"),
                                        "optics.minimum_branch_intensity"),
                       maxBoundaryInteractions.get<int>(),
+                      workerCount,
                       {},
                       std::nullopt};
 

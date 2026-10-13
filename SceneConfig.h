@@ -34,6 +34,7 @@ struct SceneConfig {
   double pathLength;
   double minimumBranchIntensity;
   int maxBoundaryInteractions;
+  int workerCount;
   std::vector<SphereDescription> spheres;
   std::optional<PlaneDetectorDescription> detector;
 };

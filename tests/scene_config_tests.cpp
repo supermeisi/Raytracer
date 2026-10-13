@@ -1,7 +1,9 @@
 #include "Detector.h"
 #include "Fresnel.h"
+#include "RayTracingEngine.h"
 #include "SceneConfig.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -105,6 +107,8 @@ int main() {
             "Fresnel branch threshold should be loaded");
     Require(example.maxBoundaryInteractions == 8,
             "boundary interaction limit should be loaded");
+    Require(example.workerCount == 0,
+            "zero worker count should select automatic concurrency");
     Require(example.detector.has_value(),
             "example scene should configure a plane detector");
     Require(example.detector->binsX == 100 && example.detector->binsY == 100,
@@ -184,7 +188,87 @@ int main() {
               "angled source rays should stay inside its cone");
     }
 
+    SceneConfig threadedScene = example;
+    threadedScene.rayCount = 64;
+    threadedScene.openingAngleDegrees = 30.0;
+    const auto threadedDirections = GenerateRayDirections(threadedScene);
+    std::atomic<std::size_t> serialCompleted{0};
+    const auto serialRays =
+        TraceRaysParallel(threadedScene, threadedDirections, 1, serialCompleted);
+    Require(serialCompleted.load() == threadedDirections.size(),
+            "serial tracing progress should reach the ray count");
+    std::atomic<std::size_t> parallelCompleted{0};
+    const auto parallelRays = TraceRaysParallel(
+        threadedScene, threadedDirections, 4, parallelCompleted);
+    Require(parallelCompleted.load() == threadedDirections.size(),
+            "parallel tracing progress should reach the ray count");
+    Require(serialRays.size() == parallelRays.size(),
+            "serial and parallel tracing should produce the same ray count");
+    for (std::size_t ray = 0; ray < serialRays.size(); ++ray) {
+      Require(serialRays[ray].segments.size() ==
+                  parallelRays[ray].segments.size(),
+              "serial and parallel tracing should produce the same segments");
+      for (std::size_t segment = 0;
+           segment < serialRays[ray].segments.size(); ++segment) {
+        const auto &serial = serialRays[ray].segments[segment];
+        const auto &parallel = parallelRays[ray].segments[segment];
+        Require(serial.start == parallel.start && serial.end == parallel.end &&
+                    serial.sphereIndex == parallel.sphereIndex &&
+                    serial.intensity == parallel.intensity,
+                "thread count should not change traced ray results");
+      }
+      Require(serialRays[ray].detectorHit.has_value() ==
+                  parallelRays[ray].detectorHit.has_value(),
+              "thread count should not change detector hit results");
+      if (serialRays[ray].detectorHit) {
+        Require(serialRays[ray].detectorHit->binX ==
+                        parallelRays[ray].detectorHit->binX &&
+                    serialRays[ray].detectorHit->binY ==
+                        parallelRays[ray].detectorHit->binY &&
+                    serialRays[ray].detectorIntensity ==
+                        parallelRays[ray].detectorIntensity,
+                "thread count should not change detector hit bins");
+      }
+    }
+
+    PlaneDetectorHistogram serialHistogram(*threadedScene.detector);
+    PlaneDetectorHistogram parallelHistogram(*threadedScene.detector);
+    for (const TracedRay &ray : serialRays) {
+      if (ray.detectorHit) {
+        serialHistogram.Record(*ray.detectorHit, ray.detectorIntensity);
+      }
+    }
+    for (const TracedRay &ray : parallelRays) {
+      if (ray.detectorHit) {
+        parallelHistogram.Record(*ray.detectorHit, ray.detectorIntensity);
+      }
+    }
+    Require(serialHistogram.Bins() == parallelHistogram.Bins() &&
+                serialHistogram.TotalIntensity() ==
+                    parallelHistogram.TotalIntensity(),
+            "serial and parallel detector histograms should match");
+
     Require(FailsToLoad("{"), "malformed JSON should be rejected");
+    Require(FailsToLoad(R"json({
+      "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8,
+                "worker_count":-1},
+      "objects":[{"type":"sphere","center":[0,0,0],"radius":1,
+                  "refractive_index":1.5,"color":800}]
+    })json"),
+            "negative worker count should be rejected");
+    Require(FailsToLoad(R"json({
+      "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
+                "opening_angle_degrees":0},
+      "path_length":10,
+      "optics":{"minimum_branch_intensity":0.01,"max_boundary_interactions":8,
+                "worker_count":257},
+      "objects":[{"type":"sphere","center":[0,0,0],"radius":1,
+                  "refractive_index":1.5,"color":800}]
+    })json"),
+            "worker counts above 256 should be rejected");
     Require(FailsToLoad(R"json({
       "source":{"position":[0,0,-8],"direction":[0,0,1],"ray_count":1,
                 "opening_angle_degrees":0},

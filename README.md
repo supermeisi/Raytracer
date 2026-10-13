@@ -33,8 +33,12 @@ non-overlapping spheres. The source's `ray_count` sets the exact number of
 rays, `direction` aims the center ray, and `opening_angle_degrees` sets the full
 cone angle (from 0 to 180 degrees). Rays are distributed over the cone using a
 deterministic spiral pattern, with the first ray following the configured
-direction. Each sphere has a center, radius, refractive index, and ROOT color
-index.
+direction. The `optics.worker_count` setting controls the number of tracing
+threads: `0` (the default) uses the available hardware concurrency, and a
+positive value selects an explicit worker count from 1 to 256. The terminal
+shows the percentage and count of source rays completed; all ROOT drawing
+remains on the main thread. Each sphere has a center, radius, refractive index,
+and ROOT color index.
 
 The detector has a center, surface normal, in-plane `u_axis`, physical width
 and height, histogram bin counts, and outline color. The `u_axis` is projected
@@ -54,7 +58,8 @@ the 3D scene, with the ROOT `COLZ` histogram in a second canvas.
   "path_length": 20,
   "optics": {
     "minimum_branch_intensity": 0.01,
-    "max_boundary_interactions": 8
+    "max_boundary_interactions": 8,
+    "worker_count": 0
   },
   "detector": {
     "name": "Exit plane detector",
